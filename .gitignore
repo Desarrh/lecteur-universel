@@ -1,0 +1,5 @@
+/target/
+/dist/
+# Généré par `lecteur-universel --generer-tests tests` (plusieurs centaines de Mo)
+/tests/
+*.exe.old

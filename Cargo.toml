@@ -1,0 +1,46 @@
+[package]
+name = "lecteur-universel"
+version = "0.2.0"
+edition = "2024"
+description = "Lightweight universal file viewer and converter for Windows"
+license = "MIT"
+repository = "https://github.com/Desarrh/lecteur-universel"
+
+[dependencies]
+egui = "0.37.0"
+egui_extras = { version = "0.37.0", default-features = false }
+egui-winit = { version = "0.37.0", default-features = false, features = ["clipboard", "links"] }
+winit = "0.30.13"
+softbuffer = "0.4.8"
+hdrshot-egui-backend = "0.2.0"
+bytemuck = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico", "tiff"] }
+drag = "2.1.1"
+hound = "3.5"
+gif = "0.14"
+webp = { version = "0.3", default-features = false }
+zip = { version = "9", default-features = false, features = ["deflate"] }
+quick-xml = "0.38"
+windows = { version = "0.62", features = [
+  "Foundation", "Storage", "Storage_Streams", "Data_Pdf",
+  "Win32_Foundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant",
+  "Win32_Media_MediaFoundation", "Win32_Graphics_Imaging", "Win32_Graphics_Dxgi_Common",
+  "Win32_System_WinRT", "Win32_System_Pipes", "Win32_Storage_FileSystem", "Win32_System_Registry",
+  "Win32_Security", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_System_IO", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Ole", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader",
+] }
+windows-core = "0.62"
+windows-future = "0.3"
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+strip = true
+opt-level = 3
+
+[build-dependencies]
+winresource = "0.1.34"
