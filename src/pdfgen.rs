@@ -110,6 +110,8 @@ struct Writer {
     pages: Vec<Vec<u8>>,
     cur: Vec<u8>,
     y: f32,
+    /// Images (largeur, hauteur, RGB compressé zlib)
+    images: Vec<(u32, u32, Vec<u8>)>,
 }
 
 const PW: f32 = 595.0;
@@ -118,7 +120,34 @@ const M: f32 = 62.0;
 
 impl Writer {
     fn new() -> Self {
-        Writer { pages: Vec::new(), cur: Vec::new(), y: PH - M }
+        Writer { pages: Vec::new(), cur: Vec::new(), y: PH - M, images: Vec::new() }
+    }
+    /// Image pleine largeur de texte (au plus), sur une nouvelle page si besoin.
+    fn image(&mut self, bytes: &[u8]) {
+        use std::io::Write;
+        let Ok(img) = image::load_from_memory(bytes) else { return };
+        let img = if img.width() > 1400 { img.resize(1400, 1400 * img.height() / img.width().max(1), image::imageops::FilterType::Triangle) } else { img };
+        let rgb = img.to_rgb8();
+        let (iw, ih) = rgb.dimensions();
+        let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        if z.write_all(rgb.as_raw()).is_err() {
+            return;
+        }
+        let Ok(data) = z.finish() else { return };
+        let maxw = PW - 2.0 * M;
+        let mut w = (iw as f32 * 0.75).min(maxw);
+        let mut h = w * ih as f32 / iw as f32;
+        let maxh = PH - 2.0 * M;
+        if h > maxh {
+            h = maxh;
+            w = h * iw as f32 / ih as f32;
+        }
+        self.need(h + 8.0);
+        self.y -= h + 4.0;
+        let k = self.images.len();
+        self.images.push((iw, ih, data));
+        self.cur.extend_from_slice(format!("q {w:.1} 0 0 {h:.1} {M:.1} {:.1} cm /Im{k} Do Q\n", self.y).as_bytes());
+        self.y -= 8.0;
     }
     fn need(&mut self, h: f32) {
         if self.y - h < M {
@@ -214,8 +243,11 @@ impl Writer {
             out.extend_from_slice(&body);
             out.extend_from_slice(b"\nendobj\n");
         };
-        // 1 catalogue, 2 pages, 3-5 polices, puis (page, contenu) × n
+        // 1 catalogue, 2 pages, 3-5 polices, puis (page, contenu) × n, puis les images
         let kids: Vec<String> = (0..n).map(|i| format!("{} 0 R", 6 + i * 2)).collect();
+        let img_base = 6 + n * 2;
+        let xobj: String = (0..self.images.len()).map(|k| format!("/Im{k} {} 0 R ", img_base + k)).collect();
+        let xobj = if xobj.is_empty() { String::new() } else { format!(" /XObject << {xobj}>>") };
         obj(&mut out, &mut offs, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec());
         obj(&mut out, &mut offs, format!("<< /Type /Pages /Count {n} /Kids [{}] >>", kids.join(" ")).into_bytes());
         for f in ["Helvetica", "Helvetica-Bold", "Courier"] {
@@ -225,10 +257,16 @@ impl Writer {
             obj(
                 &mut out,
                 &mut offs,
-                format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {PW} {PH}] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >> >> /Contents {} 0 R >>", 7 + i * 2).into_bytes(),
+                format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {PW} {PH}] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >>{xobj} >> /Contents {} 0 R >>", 7 + i * 2).into_bytes(),
             );
             let mut body = format!("<< /Length {} >>\nstream\n", content.len()).into_bytes();
             body.extend_from_slice(content);
+            body.extend_from_slice(b"\nendstream");
+            obj(&mut out, &mut offs, body);
+        }
+        for (iw, ih, data) in &self.images {
+            let mut body = format!("<< /Type /XObject /Subtype /Image /Width {iw} /Height {ih} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode /Length {} >>\nstream\n", data.len()).into_bytes();
+            body.extend_from_slice(data);
             body.extend_from_slice(b"\nendstream");
             obj(&mut out, &mut offs, body);
         }
@@ -272,6 +310,7 @@ pub fn docx_to_pdf(blocks: &[Block], out: &Path) -> Result<(), String> {
                 w.para(&rs, size, if *list { 14.0 } else { 0.0 }, 1.42);
                 w.y -= size * 0.45;
             }
+            Block::Image(b) => w.image(b),
             Block::Table(rows) => {
                 let cols = rows.iter().map(|r| r.len()).max().unwrap_or(1).max(1);
                 let cw = (PW - 2.0 * M) / cols as f32;

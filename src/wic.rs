@@ -1,0 +1,90 @@
+//! Décodage d'images par Windows (WIC) : HEIC/HEIF (photos iPhone), AVIF, JPEG XR,
+//! RAW d'appareils photo, DDS… — tout ce que Windows sait lire, sans rien embarquer.
+
+use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+use windows::Win32::Graphics::Imaging::*;
+use windows::Win32::System::Com::*;
+use windows::core::HSTRING;
+
+/// Formats confiés à Windows (la crate `image` ne les lit pas).
+pub const EXTS: &[&str] = &["heic", "heif", "avif", "jxr", "wdp", "hdp", "dds", "dng", "cr2", "cr3", "nef", "nrw", "arw", "raf", "orf", "rw2", "pef", "srw"];
+
+pub fn decode(path: &str) -> Result<image::RgbaImage, String> {
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let f: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).map_err(|e| e.message().to_string())?;
+        let dec = f.CreateDecoderFromFilename(&HSTRING::from(path), None, GENERIC_READ, WICDecodeMetadataCacheOnDemand).map_err(|_| missing_codec(path))?;
+        let frame = dec.GetFrame(0).map_err(|e| e.message().to_string())?;
+        let conv = f.CreateFormatConverter().map_err(|e| e.message().to_string())?;
+        conv.Initialize(&frame, &GUID_WICPixelFormat32bppRGBA, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeCustom).map_err(|e| e.message().to_string())?;
+        let (mut w, mut h) = (0u32, 0u32);
+        conv.GetSize(&mut w, &mut h).map_err(|e| e.message().to_string())?;
+        let mut buf = vec![0u8; (w * h * 4) as usize];
+        conv.CopyPixels(std::ptr::null(), w * 4, &mut buf).map_err(|e| e.message().to_string())?;
+        image::RgbaImage::from_raw(w, h, buf).ok_or_else(|| "image vide".to_string())
+    }
+}
+
+fn missing_codec(path: &str) -> String {
+    let e = path.rsplit('.').next().unwrap_or("").to_lowercase();
+    match e.as_str() {
+        "heic" | "heif" => "Format HEIC : installez « Extensions d'image HEIF » (et « Extensions vidéo HEVC ») depuis le Microsoft Store.".into(),
+        "avif" => "Format AVIF : installez « Extension vidéo AV1 » depuis le Microsoft Store.".into(),
+        "dng" | "cr2" | "cr3" | "nef" | "nrw" | "arw" | "raf" | "orf" | "rw2" | "pef" | "srw" => "Photo RAW : installez « Extension d'image brute » depuis le Microsoft Store.".into(),
+        _ => "Windows ne sait pas décoder ce format.".into(),
+    }
+}
+
+/// `image` d'abord (rapide, sans COM), Windows ensuite.
+pub fn open_any(path: &std::path::Path) -> Result<image::RgbaImage, String> {
+    let ext = crate::kind::ext(path);
+    if !EXTS.contains(&ext.as_str()) {
+        let r = image::ImageReader::open(path).map_err(|e| e.to_string()).and_then(|r| r.with_guessed_format().map_err(|e| e.to_string())).and_then(|r| r.decode().map_err(|e| e.to_string()));
+        match r {
+            Ok(i) => return Ok(i.to_rgba8()),
+            Err(e) if !path.exists() => return Err(e),
+            Err(_) => {}
+        }
+    }
+    decode(&path.to_string_lossy())
+}
+
+/// Encode en HEIC avec l'encodeur de Windows (extension HEIF requise) — sert aux fichiers de test.
+pub fn encode_heic(img: &image::RgbaImage, out: &std::path::Path) -> Result<(), String> {
+    let r = encode_heic_inner(img, out);
+    if r.is_err() {
+        let _ = std::fs::remove_file(out);
+    }
+    r.map_err(|e| format!("{e} (l'encodeur HEIF de Windows demande aussi l'extension « Extensions vidéo HEVC »)"))
+}
+
+fn encode_heic_inner(img: &image::RgbaImage, out: &std::path::Path) -> Result<(), String> {
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let e = |x: windows::core::Error| x.message().to_string();
+        let f: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).map_err(e)?;
+        let stream = f.CreateStream().map_err(e)?;
+        stream.InitializeFromFilename(&HSTRING::from(out.to_string_lossy().as_ref()), GENERIC_WRITE.0).map_err(e)?;
+        let enc = f.CreateEncoder(&GUID_ContainerFormatHeif, std::ptr::null()).map_err(|_| "pas d'encodeur HEIF (extension HEIF absente)".to_string())?;
+        enc.Initialize(&stream, WICBitmapEncoderNoCache).map_err(e)?;
+        let mut frame = None;
+        enc.CreateNewFrame(&mut frame, std::ptr::null_mut()).map_err(e)?;
+        let frame = frame.ok_or("cadre HEIF")?;
+        frame.Initialize(None).map_err(e)?;
+        let (w, h) = img.dimensions();
+        frame.SetSize(w, h).map_err(e)?;
+        let mut fmt = GUID_WICPixelFormat32bppBGRA;
+        frame.SetPixelFormat(&mut fmt).map_err(e)?;
+        let mut bgra: Vec<u8> = img.as_raw().chunks_exact(4).flat_map(|p| [p[2], p[1], p[0], p[3]]).collect();
+        if fmt != GUID_WICPixelFormat32bppBGRA {
+            // l'encodeur a demandé autre chose (souvent BGR 24 bits)
+            bgra = img.as_raw().chunks_exact(4).flat_map(|p| [p[2], p[1], p[0]]).collect();
+            frame.WritePixels(h, w * 3, &mut bgra).map_err(e)?;
+        } else {
+            frame.WritePixels(h, w * 4, &mut bgra).map_err(e)?;
+        }
+        frame.Commit().map_err(e)?;
+        enc.Commit().map_err(e)?;
+        Ok(())
+    }
+}

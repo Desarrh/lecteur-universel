@@ -83,6 +83,7 @@ struct TxtV {
     wrap: bool,
     lossy: bool,
     truncated: bool,
+    ed: crate::editor::EditState,
 }
 
 struct PdfV {
@@ -95,6 +96,13 @@ struct PdfV {
     zoom: f32,
     err: Option<String>,
     scroll_to: Option<u32>,
+    /// Texte des pages (extrait à la demande) et recherche
+    texts: Option<Vec<String>>,
+    texts_rx: Option<Receiver<Result<Vec<String>, String>>>,
+    find_open: bool,
+    find: String,
+    find_hit: usize,
+    focus_find: bool,
 }
 
 struct MedV {
@@ -116,6 +124,11 @@ struct MedV {
     want: (u32, u32),
     /// Sous-fenêtre où la carte graphique affiche la vidéo
     vw: Option<crate::vidwin::VideoWindow>,
+    /// Sous-titres (nom du fichier, répliques), affichés ?, décalage (s), zone à l'écran
+    subs: Option<(String, Vec<crate::subs::Cue>)>,
+    subs_on: bool,
+    sub_offset: f64,
+    sub_rect: Option<Rect>,
 }
 
 enum View {
@@ -341,6 +354,10 @@ impl App {
                 match (i == active && !hide_all, m.vrect) {
                     (true, Some(r)) => {
                         let r = px(&r);
+                        let mut cuts = cuts.clone();
+                        if let Some(sr) = m.sub_rect {
+                            cuts.push(px(&sr));
+                        }
                         if vw.place(r, &cuts) {
                             if let Some(p) = &m.p {
                                 p.set_output(r.2, r.3);
@@ -386,6 +403,9 @@ impl App {
             if p.is_dir() {
                 continue;
             }
+            if matches!(kind::ext(&p).as_str(), "srt" | "vtt") && self.attach_subs(&p) {
+                continue;
+            }
             if let Some(i) = self.tabs.iter().position(|t| t.path == p) {
                 self.active = i;
                 continue;
@@ -396,6 +416,26 @@ impl App {
         }
         self.target = None;
         self.last_out.clear();
+    }
+
+    /// Attache des sous-titres à l'onglet vidéo actif. Faux s'il n'y a pas de vidéo active.
+    fn attach_subs(&mut self, p: &Path) -> bool {
+        let Some(t) = self.tabs.get_mut(self.active) else { return false };
+        let View::Media(m) = &mut t.view else { return false };
+        if t.kind != Kind::Video {
+            return false;
+        }
+        match crate::subs::load(p) {
+            Some(c) => {
+                let n = c.len();
+                m.subs = Some((p.file_name().unwrap_or_default().to_string_lossy().into_owned(), c));
+                m.subs_on = true;
+                m.sub_offset = 0.0;
+                self.say(format!("Sous-titres chargés ({n} répliques)"), false);
+            }
+            None => self.say("Fichier de sous-titres illisible", true),
+        }
+        true
     }
 
     fn remember(&mut self, p: &Path) {
@@ -412,9 +452,8 @@ impl App {
         let ps = path.to_string_lossy().to_string();
         let restore = self.s.positions.get(&ps).copied();
         let view = match k {
-            Kind::Image => match image::ImageReader::open(&path).and_then(|r| r.with_guessed_format()).map_err(|e| e.to_string()).and_then(|r| r.decode().map_err(|e| e.to_string())) {
+            Kind::Image => match crate::wic::open_any(&path) {
                 Ok(img) => {
-                    let img = img.to_rgba8();
                     let anim = if kind::ext(&path) == "gif" { load_gif(&path) } else { Vec::new() };
                     let frames = anim.len().max(1);
                     View::Image(Box::new(ImgV {
@@ -449,7 +488,7 @@ impl App {
                             View::Error("Fichier binaire : pas d'aperçu possible.".into())
                         } else {
                             let text = text.replace("\r\n", "\n");
-                            View::Text(Box::new(TxtV { saved: text.clone(), text, lang: kind::ext(&path), wrap: false, lossy, truncated }))
+                            View::Text(Box::new(TxtV { saved: text.clone(), text, lang: kind::ext(&path), wrap: false, lossy, truncated, ed: Default::default() }))
                         }
                     }
                     Err(e) => View::Error(e.to_string()),
@@ -468,6 +507,12 @@ impl App {
                     zoom: 1.0,
                     err: None,
                     scroll_to: if page > 0 { Some(page) } else { None },
+                    texts: None,
+                    texts_rx: None,
+                    find_open: false,
+                    find: String::new(),
+                    find_hit: 0,
+                    focus_find: false,
                 }))
             }
             Kind::Docx => match docx::parse(&ps) {
@@ -516,6 +561,10 @@ impl App {
                     vrect: None,
                     want: (0, 0),
                     vw,
+                    subs: if audio { None } else { crate::subs::find_sidecar(&path).and_then(|p| crate::subs::load(&p).map(|c| (p.file_name().unwrap_or_default().to_string_lossy().into_owned(), c))) },
+                    subs_on: true,
+                    sub_offset: 0.0,
+                    sub_rect: None,
                 }))
             }
         };
@@ -739,6 +788,27 @@ impl App {
                     }
                 }
                 View::Pdf(v) => {
+                    if let Some(rx) = &v.texts_rx {
+                        if let Ok(r) = rx.try_recv() {
+                            v.texts_rx = None;
+                            match r {
+                                Ok(t) => v.texts = Some(t),
+                                Err(e) => {
+                                    v.texts = Some(Vec::new());
+                                    self.toast = Some((e, true, Instant::now()));
+                                }
+                            }
+                        }
+                    }
+                    if (v.find_open || std::env::var("LECTEUR_PDF_TEXTE").is_ok()) && v.texts.is_none() && v.texts_rx.is_none() {
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        let (ps, wake) = (t.path.to_string_lossy().to_string(), self.wake.clone());
+                        std::thread::spawn(move || {
+                            let _ = tx.send(crate::pdf::page_texts(&ps));
+                            wake();
+                        });
+                        v.texts_rx = Some(rx);
+                    }
                     while let Ok(msg) = v.w.rx.try_recv() {
                         match msg {
                             pdf::Msg::Opened { pages, sizes } => {
@@ -789,7 +859,8 @@ impl App {
             self.active = if shift { (self.active + self.tabs.len() - 1) % self.tabs.len() } else { (self.active + 1) % self.tabs.len() };
         }
         if ctrl && pressed(Key::S) {
-            self.save_current(shift);
+            let is_text = matches!(self.tabs.get(self.active).map(|t| &t.view), Some(View::Text(_)));
+            self.save_current(if is_text { !shift } else { shift });
         }
         if ctrl && pressed(Key::Z) && !typing {
             self.undo_image();
@@ -821,6 +892,17 @@ impl App {
         let kind = t.kind;
         match &mut t.view {
             View::Media(m) => {
+                if m.subs.is_some() {
+                    if pressed(Key::V) {
+                        m.subs_on = !m.subs_on;
+                    }
+                    if pressed(Key::G) {
+                        m.sub_offset -= 0.1;
+                    }
+                    if pressed(Key::H) {
+                        m.sub_offset += 0.1;
+                    }
+                }
                 let Some(p) = m.p.as_mut() else { return };
                 if pressed(Key::Space) || pressed(Key::K) {
                     p.toggle();

@@ -11,18 +11,21 @@ pub enum Kind {
     Unknown,
 }
 
-pub const IMAGE: &[&str] = &["png", "jpg", "jpeg", "webp", "gif", "bmp", "ico", "tif", "tiff"];
+pub const IMAGE: &[&str] = &[
+    "png", "jpg", "jpeg", "jfif", "webp", "gif", "bmp", "ico", "tif", "tiff", "heic", "heif", "avif", "jxr", "wdp", "hdp", "dds", "dng", "cr2", "cr3", "nef",
+    "nrw", "arw", "raf", "orf", "rw2", "pef", "srw",
+];
 pub const AUDIO: &[&str] = &["mp3", "wav", "m4a", "aac", "flac", "wma", "ogg"];
 pub const VIDEO: &[&str] = &["mp4", "mov", "m4v", "mkv", "avi", "wmv", "webm"];
 pub const TEXT: &[&str] = &[
     "txt", "md", "log", "csv", "json", "toml", "yaml", "yml", "ini", "cfg", "xml", "html", "htm", "css", "js", "ts", "tsx", "jsx", "rs", "py",
-    "c", "h", "cpp", "hpp", "cs", "java", "go", "sh", "ps1", "bat", "sql", "lua", "gd", "kt", "swift", "php", "rb",
+    "c", "h", "cpp", "hpp", "cs", "java", "go", "sh", "ps1", "bat", "sql", "lua", "gd", "kt", "swift", "php", "rb", "srt", "vtt",
 ];
 pub const ALL_EXTS: &[&str] = &[
-    "png", "jpg", "jpeg", "webp", "gif", "bmp", "ico", "tif", "tiff", "mp3", "wav", "m4a", "aac", "flac", "wma", "mp4", "mov", "m4v", "mkv",
+    "png", "jpg", "jpeg", "webp", "gif", "bmp", "ico", "tif", "tiff", "heic", "heif", "avif", "mp3", "wav", "m4a", "aac", "flac", "wma", "mp4", "mov", "m4v", "mkv",
     "avi", "wmv", "pdf", "docx", "txt", "md", "log", "csv", "json", "toml", "yaml", "yml", "ini", "xml", "rs", "py", "js", "ts", "css",
 ];
-pub const DIALOG_PATTERN: &str = "*.png;*.jpg;*.jpeg;*.webp;*.gif;*.bmp;*.ico;*.tif;*.tiff;*.mp3;*.wav;*.m4a;*.aac;*.flac;*.wma;*.mp4;*.mov;*.m4v;*.mkv;*.avi;*.wmv;*.pdf;*.docx;*.txt;*.md;*.log;*.csv;*.json;*.toml;*.yaml;*.yml;*.ini;*.xml;*.html;*.css;*.js;*.ts;*.rs;*.py;*.c;*.cpp;*.h;*.cs;*.java;*.go;*.sh;*.ps1;*.bat;*.sql;*.lua;*.gd";
+pub const DIALOG_PATTERN: &str = "*.heic;*.heif;*.avif;*.dng;*.cr2;*.nef;*.arw;*.srt;*.vtt;*.png;*.jpg;*.jpeg;*.webp;*.gif;*.bmp;*.ico;*.tif;*.tiff;*.mp3;*.wav;*.m4a;*.aac;*.flac;*.wma;*.mp4;*.mov;*.m4v;*.mkv;*.avi;*.wmv;*.pdf;*.docx;*.txt;*.md;*.log;*.csv;*.json;*.toml;*.yaml;*.yml;*.ini;*.xml;*.html;*.css;*.js;*.ts;*.rs;*.py;*.c;*.cpp;*.h;*.cs;*.java;*.go;*.sh;*.ps1;*.bat;*.sql;*.lua;*.gd";
 
 pub fn ext(p: &Path) -> String {
     p.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default()

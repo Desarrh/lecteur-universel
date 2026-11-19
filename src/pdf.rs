@@ -80,6 +80,21 @@ pub fn render(doc: &PdfDocument, index: u32, width: u32) -> Result<image::RgbaIm
     image::load_from_memory(&bytes).map(|i| i.to_rgba8()).map_err(|e| e.to_string())
 }
 
+/// Texte de chaque page (lopdf : Windows.Data.Pdf ne donne que des images).
+/// Les PDF scannés (images seules) renvoient des pages vides.
+pub fn page_texts(path: &str) -> Result<Vec<String>, String> {
+    let doc = lopdf::Document::load(path).map_err(|e| format!("texte illisible : {e}"))?;
+    let pages: Vec<u32> = doc.get_pages().keys().copied().collect();
+    Ok(pages
+        .iter()
+        .map(|n| {
+            let t = doc.extract_text(&[*n]).unwrap_or_default();
+            // lopdf met souvent un retour à la ligne par fragment : on recolle les lignes.
+            t.lines().map(str::trim_end).collect::<Vec<_>>().join("\n").trim().to_string()
+        })
+        .collect())
+}
+
 /// Exporte toutes les pages en PNG (dossier à côté du PDF).
 pub fn export_pngs(path: &str, out_dir: &std::path::Path, width: u32, progress: &dyn Fn(f32)) -> Result<usize, String> {
     let doc = load(path).map_err(|e| e.message().to_string())?;

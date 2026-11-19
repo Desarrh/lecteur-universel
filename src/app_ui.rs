@@ -667,6 +667,10 @@ impl App {
             View::Text(v) => {
                 section(ui, "Texte", &p);
                 ui.checkbox(&mut v.wrap, "Retour à la ligne automatique");
+                ui.label(RichText::new("Ctrl+F rechercher · Ctrl+H remplacer · Ctrl+G aller à la ligne").size(12.0).color(p.muted));
+                if matches!(v.lang.as_str(), "md" | "markdown") {
+                    ui.checkbox(&mut v.ed.preview, "Aperçu Markdown (Ctrl+E)");
+                }
                 if v.truncated {
                     ui.label(RichText::new("Fichier tronqué à 8 Mo : enregistrement désactivé.").color(p.del));
                 }
@@ -676,12 +680,15 @@ impl App {
                 section(ui, "Enregistrer", &p);
                 let dirty = v.text != v.saved && !v.truncated;
                 ui.add_enabled_ui(dirty, |ui| {
-                    if icons::wide(ui, Icon::Save, "Enregistrer une copie", "Ctrl+S", w, Some((p.accent, p.on_accent)), &p).clicked() {
-                        action = Some("save_copy");
+                    if icons::wide(ui, Icon::Save, "Enregistrer", "Ctrl+S", w, Some((p.accent, p.on_accent)), &p)
+                        .on_hover_text("Écrit le fichier ; l'ancienne version est gardée dans %TEMP%\\lecteur-universel-sauvegardes")
+                        .clicked()
+                    {
+                        action = Some("save_replace");
                     }
                     ui.add_space(4.0);
-                    if icons::wide(ui, Icon::Copy, "Remplacer l'original", "Ctrl+Maj+S", w, None, &p).clicked() {
-                        action = Some("save_replace");
+                    if icons::wide(ui, Icon::Copy, "Enregistrer une copie", "Ctrl+Maj+S", w, None, &p).clicked() {
+                        action = Some("save_copy");
                     }
                     ui.add_space(4.0);
                     if icons::wide(ui, Icon::Reset, "Annuler les modifications", "", w, None, &p).clicked() {
@@ -747,6 +754,33 @@ impl App {
                 section(ui, "Lecture", &p);
                 ui.checkbox(&mut m.loop_sel, "Boucler sur la sélection");
                 if kind == Kind::Video {
+                    section(ui, "Sous-titres", &p);
+                    match &m.subs {
+                        Some((name, cues)) => {
+                            let g = elided(ui, &format!("{name} · {} répliques", cues.len()), FontId::proportional(12.5), p.muted, w);
+                            ui.label(g);
+                            ui.checkbox(&mut m.subs_on, "Afficher   V");
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("Décalage").color(p.muted));
+                                if ui.small_button("−0,1 s  G").clicked() {
+                                    m.sub_offset -= 0.1;
+                                }
+                                ui.label(RichText::new(format!("{:+.1} s", m.sub_offset).replace('.', ",")).monospace());
+                                if ui.small_button("+0,1 s  H").clicked() {
+                                    m.sub_offset += 0.1;
+                                }
+                            });
+                        }
+                        None => {
+                            ui.label(RichText::new("Aucun fichier .srt / .vtt à côté de la vidéo. Glissez-en un sur la vidéo, ou :").size(12.0).color(p.muted));
+                        }
+                    }
+                    ui.add_space(4.0);
+                    if icons::wide(ui, Icon::Open, "Charger des sous-titres…", "", w, None, &p).clicked() {
+                        action = Some("load_subs");
+                    }
+                }
+                if kind == Kind::Video {
                     section(ui, "Image", &p);
                     if icons::wide(ui, Icon::Camera, "Capturer l'image", "C", w, None, &p).on_hover_text("PNG en pleine définition + copie dans le presse-papiers").clicked() {
                         action = Some("capture");
@@ -763,7 +797,29 @@ impl App {
                     });
                 }
             }
-            View::Pdf(_) | View::Docx(_) => {
+            View::Pdf(pv) => {
+                section(ui, "Texte", &p);
+                if icons::wide(ui, Icon::Open, "Rechercher dans le PDF", "Ctrl+F", w, None, &p).clicked() {
+                    pv.find_open = true;
+                    pv.focus_find = true;
+                }
+                ui.add_space(4.0);
+                if icons::wide(ui, Icon::Copy, &format!("Copier le texte de la page {}", pv.page + 1), "", w, None, &p).clicked() {
+                    let txt = match &pv.texts {
+                        Some(t) => t.get(pv.page as usize).cloned().unwrap_or_default(),
+                        None => crate::pdf::page_texts(&t.path.to_string_lossy()).ok().and_then(|t| t.get(pv.page as usize).cloned()).unwrap_or_default(),
+                    };
+                    if txt.trim().is_empty() {
+                        action = Some("pdf_notext");
+                    } else {
+                        ui.ctx().copy_text(txt);
+                        action = Some("pdf_copied");
+                    }
+                }
+                ui.add_space(6.0);
+                ui.label(RichText::new("Pour tout le texte : onglet Convertir › TXT.").size(12.0).color(p.muted));
+            }
+            View::Docx(_) => {
                 ui.add_space(8.0);
                 ui.label(RichText::new("Document en lecture seule. Convertissez-le depuis l'onglet Convertir (PDF, texte, Markdown, images…).").color(p.muted));
             }
@@ -776,6 +832,15 @@ impl App {
             Some("cut_fast") => self.cut_media(false),
             Some("cut_exact") => self.cut_media(true),
             Some("undo") => self.undo_image(),
+            Some("load_subs") => {
+                if let Some(p) = winx::open_dialog().into_iter().next() {
+                    if !self.attach_subs(&p) {
+                        self.say("Ouvrez d'abord une vidéo", true);
+                    }
+                }
+            }
+            Some("pdf_copied") => self.say("Texte de la page copié", false),
+            Some("pdf_notext") => self.say("Pas de texte sur cette page (PDF scanné ?)", true),
             Some("step_back") | Some("step_fwd") => {
                 let fwd = action == Some("step_fwd");
                 if let Some(pl) = self.tabs.get_mut(self.active).and_then(|t| t.player()) {
@@ -1113,50 +1178,8 @@ fn draw_image(ui: &mut Ui, v: &mut ImgV, p: &Palette) {
 }
 
 fn draw_text(ui: &mut Ui, v: &mut TxtV, p: &Palette) {
-    let theme = egui_extras::syntax_highlighting::CodeTheme::from_style(ui.style());
-    let lang = v.lang.clone();
-    let wrap = v.wrap;
-    let big = v.text.len() > 400_000;
-    let mut layouter = |ui: &Ui, buf: &dyn egui::TextBuffer, wrap_w: f32| {
-        let mut job = if big {
-            LayoutJob::simple(buf.as_str().to_owned(), FontId::monospace(13.5), ui.visuals().text_color(), f32::INFINITY)
-        } else {
-            egui_extras::syntax_highlighting::highlight(ui.ctx(), ui.style(), &theme, buf.as_str(), &lang)
-        };
-        for sec in &mut job.sections {
-            sec.format.font_id = FontId::monospace(13.5);
-        }
-        job.wrap.max_width = if wrap { wrap_w } else { f32::INFINITY };
-        ui.painter().layout_job(job)
-    };
-    Frame::new().fill(p.code).inner_margin(Margin { left: 0, right: 0, top: 8, bottom: 0 }).show(ui, |ui| {
-        egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
-            ui.horizontal_top(|ui| {
-                if !wrap {
-                    let n = v.text.lines().count().max(1) + usize::from(v.text.ends_with('\n'));
-                    let digits = n.to_string().len().max(3);
-                    let mut nums = String::with_capacity(n * 6);
-                    for i in 1..=n {
-                        nums.push_str(&format!("{i:>digits$}\n"));
-                    }
-                    ui.add_space(10.0);
-                    ui.add(egui::Label::new(RichText::new(nums.trim_end()).monospace().size(13.5).color(p.muted.gamma_multiply(0.65))).selectable(false));
-                    ui.add_space(6.0);
-                }
-                ui.add(
-                    egui::TextEdit::multiline(&mut v.text)
-                        .code_editor()
-                        .font(FontId::monospace(13.5))
-                        .frame(Frame::NONE)
-                        .desired_width(if wrap { ui.available_width() } else { f32::INFINITY })
-                        .desired_rows(40)
-                        .lock_focus(true)
-                        .id(egui::Id::unique("editor"))
-                        .layouter(&mut layouter),
-                );
-            });
-        });
-    });
+    let TxtV { text, lang, wrap, ed, truncated, .. } = v;
+    crate::editor::show(ui, text, lang, wrap, ed, *truncated, p);
 }
 
 fn draw_docx(ui: &mut Ui, blocks: &[Block], p: &Palette) {
@@ -1201,6 +1224,36 @@ fn draw_docx(ui: &mut Ui, blocks: &[Block], p: &Palette) {
                                     ui.add_space(6.0);
                                 }
                             }
+                            Block::Image(bytes) => {
+                                // Texture mise en cache (clé = adresse des octets partagés)
+                                let key = egui::Id::unique(("docx_img", std::sync::Arc::as_ptr(bytes) as usize));
+                                let tex: Option<Option<TextureHandle>> = ui.ctx().data(|d| d.get_temp(key));
+                                let tex = match tex {
+                                    Some(t) => t,
+                                    None => {
+                                        let t = image::load_from_memory(bytes).ok().map(|i| {
+                                            let i = i.to_rgba8();
+                                            let ci = ColorImage::from_rgba_unmultiplied([i.width() as usize, i.height() as usize], i.as_raw());
+                                            ui.ctx().load_texture("docx_img", ci, TextureOptions::LINEAR)
+                                        });
+                                        ui.ctx().data_mut(|d| d.insert_temp(key, t.clone()));
+                                        t
+                                    }
+                                };
+                                match tex {
+                                    Some(t) => {
+                                        let s = t.size_vec2();
+                                        let w = s.x.min(ui.available_width());
+                                        let size = vec2(w, s.y * w / s.x);
+                                        let (r, _) = ui.allocate_exact_size(size, Sense::hover());
+                                        ui.painter().image(t.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                                        ui.add_space(8.0);
+                                    }
+                                    None => {
+                                        ui.label(RichText::new("[image dans un format non pris en charge]").italics().color(p.muted));
+                                    }
+                                }
+                            }
                             Block::Table(rows) => {
                                 ui.add_space(6.0);
                                 let cols = rows.iter().map(|r| r.len()).max().unwrap_or(1);
@@ -1234,6 +1287,83 @@ fn draw_pdf(ui: &mut Ui, v: &mut PdfV, p: &Palette) {
     if v.pages == 0 {
         ui.centered_and_justified(|ui| ui.label(RichText::new("Ouverture du PDF…").color(p.muted)));
         return;
+    }
+    // Recherche dans le texte (Ctrl+F)
+    if ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, Key::F)) {
+        v.find_open = true;
+        v.focus_find = true;
+    }
+    if v.find_open {
+        let hits: Vec<(u32, usize)> = match &v.texts {
+            Some(t) if !v.find.trim().is_empty() => {
+                let n = v.find.to_lowercase();
+                t.iter().enumerate().filter_map(|(i, s)| {
+                    let c = s.to_lowercase().matches(n.as_str()).count();
+                    (c > 0).then_some((i as u32, c))
+                }).collect()
+            }
+            _ => Vec::new(),
+        };
+        if v.find_hit >= hits.len() {
+            v.find_hit = 0;
+        }
+        Frame::new().fill(p.surface).inner_margin(Margin::symmetric(10, 6)).stroke(Stroke::new(1.0, p.border)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let r = ui.add(egui::TextEdit::singleline(&mut v.find).hint_text("Rechercher dans le PDF").desired_width(260.0).id(egui::Id::unique("pdf_find")));
+                if v.focus_find {
+                    r.request_focus();
+                    v.focus_find = false;
+                }
+                let lk = Look { fg: p.text, bg: Color32::TRANSPARENT, hover: p.hover_bg, round: false };
+                let mut go = 0i32;
+                if r.changed() {
+                    v.find_hit = 0;
+                    go = 2;
+                }
+                if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                    go = if ui.input(|i| i.modifiers.shift) { -1 } else { 1 };
+                    v.focus_find = true;
+                }
+                let status = match (&v.texts, hits.is_empty()) {
+                    (None, _) => "extraction du texte…".to_string(),
+                    (Some(t), _) if t.iter().all(|s| s.trim().is_empty()) => "pas de texte (PDF scanné)".into(),
+                    (_, true) if !v.find.trim().is_empty() => "aucun résultat".into(),
+                    (_, true) => String::new(),
+                    (_, false) => format!("page {} · {} / {} pages · {} occurrences", hits[v.find_hit].0 + 1, v.find_hit + 1, hits.len(), hits.iter().map(|h| h.1).sum::<usize>()),
+                };
+                if icons::button(ui, Icon::StepBack, 28.0, lk, "Page précédente avec le mot").clicked() {
+                    go = -1;
+                }
+                if icons::button(ui, Icon::StepFwd, 28.0, lk, "Page suivante avec le mot (Entrée)").clicked() {
+                    go = 1;
+                }
+                ui.label(RichText::new(status).size(12.0).color(p.muted));
+                if !hits.is_empty() && go != 0 {
+                    if go != 2 {
+                        v.find_hit = (v.find_hit as i64 + go as i64).rem_euclid(hits.len() as i64) as usize;
+                    }
+                    v.scroll_to = Some(hits[v.find_hit].0);
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if icons::button(ui, Icon::Close, 28.0, lk, "Fermer (Échap)").clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
+                        v.find_open = false;
+                    }
+                });
+            });
+            // Extrait autour de l'occurrence
+            if let (Some(t), Some((pg, _))) = (&v.texts, hits.get(v.find_hit)) {
+                let s = &t[*pg as usize];
+                let low = s.to_lowercase();
+                if let Some(b) = low.find(&v.find.to_lowercase()) {
+                    let start = s.char_indices().map(|(i, _)| i).filter(|i| *i <= b).rev().nth(60).unwrap_or(0);
+                    let end = s.char_indices().map(|(i, _)| i).find(|i| *i >= b + v.find.len() + 80).unwrap_or(s.len());
+                    let snippet = s.get(start..end).unwrap_or("").replace('\n', " ");
+                    ui.label(RichText::new(format!("… {snippet} …")).size(12.0).italics().color(p.muted));
+                }
+            }
+        });
     }
     let scroll = ui.input(|i| if i.modifiers.ctrl { i.smooth_scroll_delta.y } else { 0.0 });
     if scroll != 0.0 {
@@ -1364,8 +1494,24 @@ fn draw_media(ui: &mut Ui, m: &mut MedV, kind: Kind, sel: &mut (Option<f64>, Opt
             m.want = (((w as f32 * k) as u32) & !1, ((h as f32 * k) as u32) & !1);
             m.vrect = Some(rect);
         }
-        if m.frame.is_none() {
+        if m.frame.is_none() && !pl.hw_render {
             ui.painter().text(area.center(), Align2::CENTER_CENTER, "Chargement…", FontId::proportional(16.0), fg);
+        }
+        // Sous-titres (zone découpée de la vidéo en affichage direct pour rester visible)
+        m.sub_rect = None;
+        if let (true, Some((_, cues))) = (m.subs_on, &m.subs) {
+            if let Some(txt) = crate::subs::at(cues, pl.time() - m.sub_offset) {
+                let vr = m.vrect.unwrap_or(area);
+                let size = (vr.height() * 0.05).clamp(15.0, 42.0);
+                let mut job = LayoutJob::simple(txt.to_string(), FontId::new(size, FontFamily::Name("bold".into())), Color32::WHITE, vr.width() * 0.8);
+                job.halign = Align::Center;
+                let g = ui.painter().layout_job(job);
+                let gs = g.size();
+                let bx = Rect::from_center_size(pos2(vr.center().x, vr.bottom() - vr.height() * 0.07 - gs.y / 2.0), gs + vec2(28.0, 14.0));
+                ui.painter().rect_filled(bx, CornerRadius::same(8), if pl.hw_render { Color32::from_rgb(18, 18, 18) } else { Color32::from_black_alpha(185) });
+                ui.painter().galley(pos2(bx.center().x, bx.top() + 7.0), g, Color32::WHITE);
+                m.sub_rect = Some(bx);
+            }
         }
         if r.clicked() {
             pl.toggle();

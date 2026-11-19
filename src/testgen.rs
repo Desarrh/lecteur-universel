@@ -353,7 +353,7 @@ fn docx(out: &Path) -> std::result::Result<(), String> {
 
 const TEXTS: &[(&str, &str)] = &[
     ("texte.txt", "Fichier texte de test.\nAccents : é è à ç ù œ € «guillemets»\nLigne longue : Lorem ipsum n'est pas utilisé ici, on écrit simplement une phrase assez longue pour tester le retour à la ligne automatique du lecteur universel.\n"),
-    ("notes.md", "# Titre Markdown\n\n- point un\n- **gras** et *italique*\n\n```rust\nfn main() {}\n```\n"),
+    ("notes.md", "# Titre Markdown\n\nUn paragraphe avec du **gras**, de l'*italique*, du `code` et un [lien](https://example.com).\n\n## Liste\n\n- point un\n- point deux\n  - sous-point\n1. premier\n2. second\n\n> Une citation.\n\n| Format | Lecture | Conversion |\n|---|---|---|\n| PDF | oui | images, texte |\n| MP4 | oui | MP4, GIF, MP3 |\n\n---\n\n```rust\nfn main() {\n    println!(\"bonjour\");\n}\n```\n"),
     ("journal.log", "2026-11-19 14:00:01 INFO démarrage\n2026-11-19 14:00:02 WARN cache vide\n2026-11-19 14:00:03 ERROR fichier introuvable\n"),
     ("donnees.csv", "nom;type;taille\nphoto.png;image;1,2 Mo\nchanson.mp3;audio;4,5 Mo\n"),
     ("config.json", "{\n  \"theme\": \"sombre\",\n  \"volume\": 0.8,\n  \"recents\": [\"a.mp4\", \"b.pdf\"]\n}\n"),
@@ -433,6 +433,7 @@ pub fn generate(dir: &Path, big: (u32, u32, u32, u32), log: &dyn Fn(String)) {
         })
         .collect();
     ok("anime.gif", crate::convert::write_gif(&img.join("anime.gif"), frames, 24.0, &|_| {}));
+    ok("photo.heic", crate::wic::encode_heic(&im, &img.join("photo.heic")));
     // Audio
     let pcm = melody(16.0, 44100);
     ok("melodie.wav", crate::media::write_wav(&pcm, &aud.join("melodie.wav").to_string_lossy()));
@@ -459,6 +460,14 @@ pub fn generate(dir: &Path, big: (u32, u32, u32, u32), log: &dyn Fn(String)) {
         ok(name, r.map_err(|e| e.message().to_string()));
     };
     small("court-720p-30ips.mp4", &MFVideoFormat_H264, 1280, 720, 30, 8);
+    ok(
+        "court-720p-30ips.fr.srt",
+        std::fs::write(
+            vid.join("court-720p-30ips.fr.srt"),
+            "1\r\n00:00:00,500 --> 00:00:03,000\r\nSous-titres de test (chargés automatiquement).\r\n\r\n2\r\n00:00:03,500 --> 00:00:07,500\r\nTouche V : afficher / masquer — G / H : décalage.\r\n",
+        )
+        .map_err(|e| e.to_string()),
+    );
     small("court-1080p-60ips.mp4", &MFVideoFormat_H264, 1920, 1080, 60, 8);
     small("court-vertical.mp4", &MFVideoFormat_H264, 1080, 1920, 30, 6);
     small("court.wmv", &MFVideoFormat_WMV3, 1280, 720, 30, 6);

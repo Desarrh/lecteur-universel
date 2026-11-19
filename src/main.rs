@@ -4,16 +4,19 @@ mod app;
 mod clip;
 mod convert;
 mod docx;
+mod editor;
 mod icons;
 mod kind;
 mod media;
 mod montage;
 mod pdfgen;
+mod subs;
 mod testgen;
 mod update;
 mod vidwin;
 mod pdf;
 mod theme;
+mod wic;
 mod winx;
 
 use egui_software_backend::{BufferMutRef, ColorFieldOrder, EguiSoftwareRender};
@@ -79,11 +82,23 @@ impl Runner {
                     raw.events.push(egui::Event::PointerMoved(self.script_pos));
                 }
                 ["down"] | ["up"] => raw.events.push(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: parts[0] == "down", modifiers: Default::default() }),
-                ["key", k] => {
+                ["key", k] | ["ctrl", k] | ["shift", k] => {
                     if let Some(key) = egui::Key::from_name(k) {
-                        raw.events.push(egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() });
+                        let modifiers = match parts[0] {
+                            "ctrl" => egui::Modifiers::CTRL,
+                            "shift" => egui::Modifiers::SHIFT,
+                            _ => Default::default(),
+                        };
+                        // Modificateur tenu pendant cette image, relâché à l'image suivante.
+                        raw.events.push(egui::Event::ModifiersChanged(modifiers));
+                        raw.events.push(egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers });
+                        if modifiers != egui::Modifiers::default() {
+                            self.script.insert(0, (now_ms + 40, "release".into()));
+                        }
                     }
                 }
+                ["release"] => raw.events.push(egui::Event::ModifiersChanged(Default::default())),
+                ["text", ..] => raw.events.push(egui::Event::Text(cmd["text ".len()..].to_string())),
                 _ => {}
             }
         }

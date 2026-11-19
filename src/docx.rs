@@ -16,6 +16,8 @@ pub struct Run {
 pub enum Block {
     Para { level: u8, list: bool, runs: Vec<Run> },
     Table(Vec<Vec<String>>),
+    /// Image intégrée (octets PNG/JPG… tels que stockés dans le .docx)
+    Image(std::sync::Arc<Vec<u8>>),
 }
 
 pub fn parse(path: &str) -> Result<Vec<Block>, String> {
@@ -23,6 +25,39 @@ pub fn parse(path: &str) -> Result<Vec<Block>, String> {
     let mut z = zip::ZipArchive::new(f).map_err(|e| format!("pas un .docx valide : {e}"))?;
     let mut xml = String::new();
     z.by_name("word/document.xml").map_err(|e| e.to_string())?.read_to_string(&mut xml).map_err(|e| e.to_string())?;
+    // Relations : identifiant (rId…) → fichier image (media/image1.png)
+    let mut rels = std::collections::HashMap::new();
+    let mut rx = String::new();
+    if let Ok(mut f) = z.by_name("word/_rels/document.xml.rels") {
+        let _ = f.read_to_string(&mut rx);
+    }
+    let mut rr = Reader::from_str(&rx);
+    while let Ok(ev) = rr.read_event() {
+        match ev {
+            Event::Start(e) | Event::Empty(e) if e.local_name().as_ref() == b"Relationship" => {
+                let (mut id, mut target) = (String::new(), String::new());
+                for a in e.attributes().flatten() {
+                    match a.key.local_name().as_ref() {
+                        b"Id" => id = String::from_utf8_lossy(&a.value).into_owned(),
+                        b"Target" => target = String::from_utf8_lossy(&a.value).into_owned(),
+                        _ => {}
+                    }
+                }
+                rels.insert(id, target);
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    let mut images: Vec<std::sync::Arc<Vec<u8>>> = Vec::new();
+    let mut load_img = |z: &mut zip::ZipArchive<std::fs::File>, rid: &str| -> Option<std::sync::Arc<Vec<u8>>> {
+        let t = rels.get(rid)?;
+        let path = if let Some(s) = t.strip_prefix('/') { s.to_string() } else { format!("word/{t}") };
+        let mut f = z.by_name(&path).ok()?;
+        let mut b = Vec::new();
+        f.read_to_end(&mut b).ok()?;
+        Some(std::sync::Arc::new(b))
+    };
     let mut r = Reader::from_str(&xml);
     let mut out = Vec::new();
     let (mut level, mut list) = (0u8, false);
@@ -75,6 +110,16 @@ pub fn parse(path: &str) -> Result<Vec<Block>, String> {
                         }
                     }
                     b"numPr" => list = true,
+                    b"blip" => {
+                        for a in e.attributes().flatten() {
+                            if a.key.local_name().as_ref() == b"embed" {
+                                let rid = String::from_utf8_lossy(&a.value).into_owned();
+                                if let Some(img) = load_img(&mut z, &rid) {
+                                    images.push(img);
+                                }
+                            }
+                        }
+                    }
                     b"r" if !empty => cur = Run::default(),
                     b"b" => cur.bold = !off(e),
                     b"i" => cur.italic = !off(e),
@@ -118,6 +163,9 @@ pub fn parse(path: &str) -> Result<Vec<Block>, String> {
                         cell.push_str(&s);
                     } else {
                         out.push(Block::Para { level, list, runs: std::mem::take(&mut runs) });
+                    }
+                    for img in images.drain(..) {
+                        out.push(Block::Image(img));
                     }
                 }
                 b"tc" if depth_tbl == 1 => {
@@ -168,6 +216,7 @@ pub fn to_txt(b: &[Block]) -> String {
                 }
                 s.push('\n');
             }
+            Block::Image(_) => s.push_str("[image]\n"),
         }
     }
     s
@@ -214,6 +263,7 @@ pub fn to_md(b: &[Block]) -> String {
                 }
                 s.push('\n');
             }
+            Block::Image(_) => s.push_str("*[image]*\n\n"),
         }
     }
     s
@@ -257,6 +307,10 @@ pub fn to_html(b: &[Block], title: &str) -> String {
                 }
                 s.push_str("</table>\n");
             }
+            Block::Image(b) => {
+                let mime = if b.starts_with(&[0x89, b'P']) { "png" } else if b.starts_with(&[0xFF, 0xD8]) { "jpeg" } else { "gif" };
+                s.push_str(&format!("<p><img style=\"max-width:100%\" src=\"data:image/{mime};base64,{}\"></p>\n", b64(b)));
+            }
         }
     }
     s.push_str("</body></html>\n");
@@ -265,4 +319,17 @@ pub fn to_html(b: &[Block], title: &str) -> String {
 
 pub fn word_count(b: &[Block]) -> usize {
     to_txt(b).split_whitespace().count()
+}
+
+fn b64(b: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut o = String::with_capacity(b.len() * 4 / 3 + 4);
+    for c in b.chunks(3) {
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        o.push(T[(n >> 18) as usize & 63] as char);
+        o.push(T[(n >> 12) as usize & 63] as char);
+        o.push(if c.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
+        o.push(if c.len() > 2 { T[n as usize & 63] as char } else { '=' });
+    }
+    o
 }

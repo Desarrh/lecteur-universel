@@ -80,6 +80,8 @@ impl Target {
             (Target::Gif, Kind::Video) => "animation",
             (Target::Png, Kind::Video) => "image actuelle",
             (Target::Mp3, Kind::Video) => "extraire le son",
+            (Target::Txt, Kind::Pdf) => "texte des pages",
+            (Target::Html, Kind::Pdf) => "texte, page web",
             (_, Kind::Pdf) => "une image par page",
             (Target::Png, _) => "sans perte",
             (Target::Jpg, _) => "léger, photos",
@@ -114,7 +116,8 @@ impl Target {
 
 fn decoders(k: Kind) -> &'static [Hub] {
     match k {
-        Kind::Image | Kind::Pdf => &[Hub::Raster],
+        Kind::Image => &[Hub::Raster],
+        Kind::Pdf => &[Hub::Raster, Hub::Text],
         Kind::Audio => &[Hub::Pcm],
         Kind::Video => &[Hub::Stream, Hub::Frames, Hub::Pcm, Hub::Raster],
         Kind::Docx => &[Hub::Doc],
@@ -212,7 +215,7 @@ pub fn run(src: &Source, t: Target, o: &Opts, progress: &dyn Fn(f32)) -> Result<
             } else {
                 match &src.image {
                     Some(i) => i.clone(),
-                    None => image::open(&src.path).map_err(|e| e.to_string())?.to_rgba8(),
+                    None => crate::wic::open_any(&src.path)?,
                 }
             };
             let p = if src.kind == Kind::Video { free_path(&dir, &format!("{stem} {}", crate::kind::hms(src.at).replace(':', "m")), t.ext()) } else { out(t.ext()) };
@@ -276,6 +279,13 @@ pub fn run(src: &Source, t: Target, o: &Opts, progress: &dyn Fn(f32)) -> Result<
         Hub::Text => {
             let text = match &src.text {
                 Some(s) => s.clone(),
+                None if src.kind == Kind::Pdf => {
+                    let pages = crate::pdf::page_texts(&path)?;
+                    if pages.iter().all(|p| p.trim().is_empty()) {
+                        return Err("aucun texte dans ce PDF (document scanné ?)".into());
+                    }
+                    pages.iter().enumerate().map(|(i, t)| format!("--- Page {} ---\n{t}\n", i + 1)).collect::<Vec<_>>().join("\n")
+                }
                 None => String::from_utf8_lossy(&std::fs::read(&src.path).map_err(|e| e.to_string())?).into_owned(),
             };
             if t == Target::Pdf {

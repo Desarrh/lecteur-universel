@@ -2,7 +2,7 @@
 
 **A lightweight universal file viewer, editor and converter for Windows, written in Rust.**
 Open almost any file — documents, images, audio, video, code — and convert it to another format in one click.
-Small single `.exe` (~10 MB), instant start-up, no runtime to install, no ffmpeg bundled: decoding and encoding are delegated to what Windows already ships (Media Foundation, Windows.Data.Pdf, WIC).
+Small single `.exe` (~12 MB), instant start-up, no runtime to install, no ffmpeg bundled: decoding and encoding are delegated to what Windows already ships (Media Foundation, Windows.Data.Pdf, WIC).
 
 > The user interface is in **French** (the author's language). This README is in English.
 
@@ -27,12 +27,12 @@ Requirements: Windows 10 or 11, x64.
 
 | Type | View | Edit | Convert to |
 |---|---|---|---|
-| **Images** png, jpg/jpeg, webp, gif (animated), bmp, ico, tif/tiff | zoom (Ctrl + wheel, + / −, 0, 1), transparency checkerboard, animated GIF playback | rotate, mirror, crop (rule of thirds), resize, undo | PNG, JPG (quality), WEBP (lossy or lossless), BMP, TIFF, ICO, GIF |
-| **PDF** | continuous pages, zoom, remembers the page | — | PNG / JPG / WEBP (one image per page, ~200 dpi) |
-| **Word** .docx | headings, bold/italic, lists, tables | — | PDF (through Word if installed, otherwise a built-in PDF writer), TXT, Markdown, HTML |
-| **Text & code** (txt, md, json, toml, yaml, xml, html, css, js, ts, rs, py, c/cpp, cs, java, go, sh, ps1, sql, lua, gd…) | syntax highlighting, line numbers | full editing, save as copy or replace (with backup) | PDF, HTML, TXT |
+| **Images** png, jpg/jpeg, webp, gif (animated), bmp, ico, tif/tiff — plus **HEIC/HEIF, AVIF, JPEG XR, camera RAW** (dng, cr2, cr3, nef, arw…) through Windows' own decoders | zoom (Ctrl + wheel, + / −, 0, 1), transparency checkerboard, animated GIF playback | rotate, mirror, crop (rule of thirds), resize, undo | PNG, JPG (quality), WEBP (lossy or lossless), BMP, TIFF, ICO, GIF |
+| **PDF** | continuous pages, zoom, remembers the page, **text search (Ctrl+F)** with jump to page and excerpt, copy a page's text | — | PNG / JPG / WEBP (one image per page, ~200 dpi), **TXT**, HTML |
+| **Word** .docx | headings, bold/italic, lists, tables, **embedded images** | — | PDF (through Word if installed, otherwise a built-in PDF writer — images included), TXT, Markdown, HTML (images embedded) |
+| **Text & code** (txt, md, json, toml, yaml, xml, html, css, js, ts, rs, py, c/cpp, cs, java, go, sh, ps1, sql, lua, gd, srt…) | syntax highlighting, line numbers (correct even with word wrap), current line, **Markdown preview** (Ctrl+E) | full editing, **find / replace** (Ctrl+F / Ctrl+H, match case, replace all), **go to line** (Ctrl+G), Ctrl+S saves the file (previous version kept as a backup) | PDF, HTML, TXT |
 | **Audio** mp3, wav, m4a/aac, flac, wma | waveform, speed 0.25×–2×, loop | trim (MP3 is cut **without re-encoding**) | MP3 (128/192/320 kbit/s), WAV |
-| **Video** mp4, mov, m4v, mkv, avi, wmv | thumbnail timeline, frame by frame, speed 0.25×–2×, frame capture (PNG + clipboard) | trim with handles: **fast** (no re-encoding, keyframe-aligned) or **frame-accurate** (re-encoded H.264) | MP4 (resize / quality), optimised GIF, MP3, WAV, PNG |
+| **Video** mp4, mov, m4v, mkv, avi, wmv | thumbnail timeline, frame by frame, speed 0.25×–2×, frame capture (PNG + clipboard), **subtitles** (.srt / .vtt next to the video or dropped on it, adjustable offset) | trim with handles: **fast** (no re-encoding, keyframe-aligned) or **frame-accurate** (re-encoded H.264) | MP4 (resize / quality), optimised GIF, MP3, WAV, PNG |
 
 Conversions follow a **hub graph** (inspired by ConvertX / VERT): every input decodes to a hub (raster image, PCM audio, frame sequence, document, text) and every output encodes from a hub, so available targets are derived automatically and adding a format means adding one decoder or one encoder (`src/convert.rs`).
 
@@ -57,10 +57,12 @@ Results are saved next to the original (never overwritten) and can be **dragged*
 | I / O (or [ ]) | trim start / end here — X: keep everything |
 | L | jump back to the start of the selection |
 | C | capture the current video frame |
+| V · G / H | subtitles on/off · subtitle offset −/+ 0.1 s |
+| Ctrl+F · Ctrl+H · Ctrl+G · Ctrl+E | find · replace · go to line · Markdown preview (text, code; Ctrl+F also searches PDFs) |
 | Speed pill | click: faster · right click: slower · double click: 1× |
 | Tab · F / F11 | clean view · full screen |
 | Ctrl+O · Ctrl+W · Ctrl+Tab | open · close tab · next tab |
-| Ctrl+S · Ctrl+Shift+S | save a copy · replace the original |
+| Ctrl+S · Ctrl+Shift+S | text/code: save the file · save a copy — images: save a copy · replace the original |
 | R / Shift+R · Ctrl+Z | rotate image · undo |
 
 ## Performance
@@ -69,7 +71,7 @@ Measured on the author's machine (Windows 11, NVIDIA GPU, 5120×1440 monitor), r
 
 | | |
 |---|---|
-| Executable | ~10 MB, single file, no dependencies |
+| Executable | ~12 MB, single file, no dependencies |
 | Start-up | 0.1 – 0.5 s to first frame |
 
 | File open | Private RAM |
@@ -97,7 +99,7 @@ cargo build --release
 target\release\lecteur-universel.exe [files…]
 ```
 
-Main crates: `egui` / `egui-winit` / `winit`, `softbuffer` + `hdrshot-egui-backend` (CPU renderer), `windows` (Media Foundation, WinRT PDF, Direct3D 11, Win32), `image`, `webp`, `gif`, `hound`, `zip`, `quick-xml`, `egui_extras` (syntax highlighting).
+Main crates: `egui` / `egui-winit` / `winit`, `softbuffer` + `hdrshot-egui-backend` (CPU renderer), `windows` (Media Foundation, WinRT PDF, WIC, Direct3D 11, Win32), `image`, `webp`, `gif`, `hound`, `zip`, `quick-xml`, `lopdf` (PDF text), `flate2`, `egui_extras` (syntax highlighting).
 
 ### Command line & tests
 
@@ -108,15 +110,17 @@ lecteur-universel --generer-tests tests 5120 1440 60 60     # generate a folder 
 lecteur-universel --selftest <folder with i.png i.jpg k.rs a.mp3 v.mp4>   # 7 automated editing tests
 ```
 
-`--generer-tests` builds the test set used during development: images, audio (mp3, wav, m4a, wma, flac), docx + pdf, 27 text/code files, short videos and a synthetic video at your screen resolution (frame counter, sweeping bar, bouncing square, flash + beep every second, so stutter or A/V drift is obvious). It is not stored in the repository because of its size.
+`--generer-tests` builds the test set used during development: images (a HEIC photo too when Windows' HEVC extension is installed), audio (mp3, wav, m4a, wma, flac), docx + pdf, 27 text/code files, short videos (one with a French `.srt` subtitle file) and a synthetic video at your screen resolution (frame counter, sweeping bar, bouncing square, flash + beep every second, so stutter or A/V drift is obvious). It is not stored in the repository because of its size.
 
 Test switches: `LECTEUR_SHOT=out.png` (+ `LECTEUR_SHOT_MS`, `LECTEUR_SIZE=800x560`, `LECTEUR_DARK`, `LECTEUR_RAIL`, `LECTEUR_PANELS`) renders and saves a screenshot, `LECTEUR_EVENTS="1000:move 30 780;1100:down;1300:move 300 780;1400:up"` replays mouse/keyboard input, `LECTEUR_FPS=1` prints rendering and decoding rates.
 
 ## Known limitations
 
 - No WEBM output (Windows has no VP9 encoder).
-- DOCX → PDF without Microsoft Word: simple layout (standard fonts, no embedded images).
-- HEVC / AV1 playback depends on the codec extensions from the Microsoft Store.
+- DOCX → PDF without Microsoft Word: simple layout (standard fonts; images are included).
+- HEIC needs the *HEIF Image Extensions* and *HEVC Video Extensions*, AVIF the *AV1 Video Extension*, camera RAW the *Raw Image Extension* (all from the Microsoft Store); HEVC / AV1 video likewise.
+- PDF text search works on PDFs that contain text (not on scanned images); results jump to the page rather than highlighting the word.
+- Subtitles: external .srt / .vtt only (subtitle tracks embedded in MKV/MP4 are not shown).
 - UI in French only.
 
 ## License
