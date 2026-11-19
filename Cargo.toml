@@ -1,6 +1,6 @@
 [package]
 name = "lecteur-universel"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 description = "Lightweight universal file viewer and converter for Windows"
 license = "MIT"

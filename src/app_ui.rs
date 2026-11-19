@@ -922,6 +922,22 @@ impl App {
                 chips(ui, "Taille", &mut self.opts.mp4_height, &[(0, "native"), (1080, "1080p"), (720, "720p"), (480, "480p")]);
                 chips(ui, "Qualité", &mut self.opts.mp4_kbps, &[(2500, "légère"), (6000, "bonne"), (12000, "haute")]);
             }
+            Target::Pdf if kind == Kind::Image => {
+                section(ui, "Options", &p);
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.opts.pdf_scan, false, "Couleur");
+                    ui.selectable_value(&mut self.opts.pdf_scan, true, "Document scanné");
+                });
+                ui.label(
+                    RichText::new(if self.opts.pdf_scan {
+                        "Fond blanchi, ombres retirées, texte renforcé (noir et blanc) : idéal pour une photo de papier officiel."
+                    } else {
+                        "Image telle quelle, centrée sur une page A4 avec 1 cm de marge."
+                    })
+                    .size(12.0)
+                    .color(p.muted),
+                );
+            }
             Target::Gif if kind == Kind::Video => {
                 section(ui, "Options", &p);
                 chips(ui, "Taille max", &mut self.opts.gif_width, &[(320, "320"), (480, "480"), (720, "720 px")]);
@@ -948,7 +964,14 @@ impl App {
         }
         if same.len() > 1 {
             ui.add_space(6.0);
-            ui.checkbox(&mut self.batch, format!("Appliquer aux {} onglets « {} »", same.len(), kind::label(kind).to_lowercase()));
+            if tg == Target::Pdf && kind == Kind::Image {
+                ui.checkbox(&mut self.batch, format!("Prendre les {} images ouvertes", same.len()));
+                if self.batch {
+                    ui.checkbox(&mut self.opts.pdf_merge, "Dans un seul PDF (une page par image, ordre des onglets)");
+                }
+            } else {
+                ui.checkbox(&mut self.batch, format!("Appliquer aux {} onglets « {} »", same.len(), kind::label(kind).to_lowercase()));
+            }
         }
         ui.add_space(12.0);
         let busy = self.job.is_some();

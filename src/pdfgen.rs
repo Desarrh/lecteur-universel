@@ -362,3 +362,138 @@ pub fn text_to_pdf(text: &str, out: &Path) -> Result<(), String> {
     }
     std::fs::write(out, w.finish()).map_err(|e| e.to_string())
 }
+
+
+// ---------------------------------------------------------------------------
+// Images → PDF (papiers officiels, justificatifs) : une page A4 par image,
+// orientation automatique, marges de 1 cm, image en JPEG pour un fichier léger.
+
+/// « Document scanné » : retire l'éclairage inégal (ombre du téléphone, papier
+/// jauni) en divisant par le fond estimé, puis renforce le contraste. Niveaux de gris.
+pub fn scan_look(img: &image::RgbaImage) -> image::GrayImage {
+    use image::imageops::{self, FilterType};
+    let gray = image::DynamicImage::ImageRgba8(img.clone()).to_luma8();
+    let (w, h) = gray.dimensions();
+    // Fond estimé : petite version floutée (le texte disparaît, l'éclairage reste)
+    let sw = (w / 24).max(8);
+    let sh = (h / 24).max(8);
+    let small = imageops::resize(&gray, sw, sh, FilterType::Triangle);
+    // « maximum local » approché : le fond est le plus clair autour de chaque point
+    let mut bright = small.clone();
+    for y in 0..sh {
+        for x in 0..sw {
+            let mut m = 0u8;
+            for dy in -2i32..=2 {
+                for dx in -2i32..=2 {
+                    let (xx, yy) = ((x as i32 + dx).clamp(0, sw as i32 - 1) as u32, (y as i32 + dy).clamp(0, sh as i32 - 1) as u32);
+                    m = m.max(small.get_pixel(xx, yy)[0]);
+                }
+            }
+            bright.put_pixel(x, y, image::Luma([m]));
+        }
+    }
+    let bright = imageops::blur(&bright, 1.5);
+    let bg = imageops::resize(&bright, w, h, FilterType::Triangle);
+    let mut out = image::GrayImage::new(w, h);
+    for (o, (g, b)) in out.pixels_mut().zip(gray.pixels().zip(bg.pixels())) {
+        let v = g[0] as f32 / (b[0] as f32).max(40.0); // 1.0 = fond
+        // courbe : le fond devient blanc pur, l'encre reste nette
+        let v = ((v - 0.35) / 0.55).clamp(0.0, 1.0);
+        let v = v.powf(1.6);
+        o[0] = (v * 255.0) as u8;
+    }
+    out
+}
+
+pub enum PageImage {
+    Color(image::RgbImage),
+    Gray(image::GrayImage),
+}
+
+pub fn images_to_pdf(images: &[PageImage], out: &Path, quality: u8) -> Result<(), String> {
+    if images.is_empty() {
+        return Err("aucune image".into());
+    }
+    let mut buf: Vec<u8> = b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n".to_vec();
+    let mut offs: Vec<usize> = Vec::new();
+    let obj = |buf: &mut Vec<u8>, offs: &mut Vec<usize>, body: &[u8]| {
+        offs.push(buf.len());
+        buf.extend_from_slice(format!("{} 0 obj\n", offs.len()).as_bytes());
+        buf.extend_from_slice(body);
+        buf.extend_from_slice(b"\nendobj\n");
+    };
+    let n = images.len();
+    // 1 catalogue, 2 pages, puis (page, contenu, image) × n
+    let kids: Vec<String> = (0..n).map(|i| format!("{} 0 R", 3 + i * 3)).collect();
+    obj(&mut buf, &mut offs, b"<< /Type /Catalog /Pages 2 0 R >>");
+    obj(&mut buf, &mut offs, format!("<< /Type /Pages /Count {n} /Kids [{}] >>", kids.join(" ")).as_bytes());
+    for (i, im) in images.iter().enumerate() {
+        // JPEG, au plus ~300 ppp sur A4 (2480 px de grand côté)
+        let (iw, ih, cs, jpeg) = {
+            let mut jpg = Vec::new();
+            match im {
+                PageImage::Color(c) => {
+                    let c = fit(c);
+                    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpg, quality);
+                    enc.encode_image(&c).map_err(|e| e.to_string())?;
+                    (c.width(), c.height(), "DeviceRGB", jpg)
+                }
+                PageImage::Gray(g) => {
+                    let g = fit(g);
+                    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpg, quality);
+                    enc.encode_image(&g).map_err(|e| e.to_string())?;
+                    (g.width(), g.height(), "DeviceGray", jpg)
+                }
+            }
+        };
+        let landscape = iw > ih;
+        let (pw, ph) = if landscape { (842.0f32, 595.0f32) } else { (595.0f32, 842.0f32) };
+        let m = 28.35; // 1 cm
+        let s = ((pw - 2.0 * m) / iw as f32).min((ph - 2.0 * m) / ih as f32);
+        let (w, h) = (iw as f32 * s, ih as f32 * s);
+        let (x, y) = ((pw - w) / 2.0, (ph - h) / 2.0);
+        let content = format!("q {w:.2} 0 0 {h:.2} {x:.2} {y:.2} cm /Im0 Do Q");
+        let base = 3 + i * 3;
+        obj(
+            &mut buf,
+            &mut offs,
+            format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {pw} {ph}] /Resources << /XObject << /Im0 {} 0 R >> >> /Contents {} 0 R >>", base + 2, base + 1).as_bytes(),
+        );
+        obj(&mut buf, &mut offs, format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()).as_bytes());
+        let mut body = format!("<< /Type /XObject /Subtype /Image /Width {iw} /Height {ih} /ColorSpace /{cs} /BitsPerComponent 8 /Filter /DCTDecode /Length {} >>\nstream\n", jpeg.len()).into_bytes();
+        body.extend_from_slice(&jpeg);
+        body.extend_from_slice(b"\nendstream");
+        obj(&mut buf, &mut offs, &body);
+    }
+    let xref = buf.len();
+    buf.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", offs.len() + 1).as_bytes());
+    for o in &offs {
+        buf.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    buf.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", offs.len() + 1).as_bytes());
+    std::fs::write(out, buf).map_err(|e| e.to_string())
+}
+
+fn fit<P: image::Pixel + 'static>(img: &image::ImageBuffer<P, Vec<P::Subpixel>>) -> image::ImageBuffer<P, Vec<P::Subpixel>> {
+    let (w, h) = img.dimensions();
+    let k = 2480.0 / w.max(h) as f32;
+    if k >= 1.0 {
+        return img.clone();
+    }
+    image::imageops::resize(img, (w as f32 * k) as u32, (h as f32 * k) as u32, image::imageops::FilterType::Lanczos3)
+}
+
+/// Prépare une image pour le PDF selon le mode choisi.
+pub fn page_of(img: &image::RgbaImage, scan: bool) -> PageImage {
+    if scan {
+        PageImage::Gray(scan_look(img))
+    } else {
+        // fond blanc sous la transparence
+        let mut rgb = image::RgbImage::new(img.width(), img.height());
+        for (o, p) in rgb.pixels_mut().zip(img.pixels()) {
+            let a = p[3] as f32 / 255.0;
+            *o = image::Rgb([0, 1, 2].map(|c| (p[c] as f32 * a + 255.0 * (1.0 - a)) as u8));
+        }
+        PageImage::Color(rgb)
+    }
+}

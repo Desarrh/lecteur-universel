@@ -400,7 +400,8 @@ fn cli_convert(args: &[String]) -> i32 {
         };
         let duration = if matches!(k, kind::Kind::Video) { 1e9 } else { 0.0 };
         let src = convert::Source { path, kind: k, image: None, text: None, range: None, at: 0.0, duration };
-        match convert::run(&src, t, &convert::Opts::default(), &|_| {}) {
+        let opts = convert::Opts { pdf_scan: std::env::var("LECTEUR_SCAN").is_ok(), ..Default::default() };
+        match convert::run(&src, t, &opts, &|_| {}) {
             Ok(v) => v.iter().for_each(|p| println!("{}", p.display())),
             Err(e) => {
                 eprintln!("{f} : {e}");
@@ -460,6 +461,20 @@ fn main() {
         let r = montage::video_thumbs(&args[1], 40, 200, &|i, img| println!("{i} {}x{} {:?}", img.width(), img.height(), t0.elapsed()));
         println!("{r:?} {:?}", t0.elapsed());
         return;
+    }
+    // lecteur-universel --assembler-pdf sortie.pdf [--scan] image1 image2 … (une page par image)
+    if args.first().map(|a| a == "--assembler-pdf").unwrap_or(false) && args.len() > 2 {
+        let scan = args.iter().any(|a| a == "--scan");
+        let mut pages = Vec::new();
+        for f in args[2..].iter().filter(|a| *a != "--scan") {
+            match wic::open_any(std::path::Path::new(f)) {
+                Ok(i) => pages.push(pdfgen::page_of(&i, scan)),
+                Err(e) => eprintln!("{f} : {e}"),
+            }
+        }
+        let r = pdfgen::images_to_pdf(&pages, std::path::Path::new(&args[1]), 85);
+        println!("{} pages : {r:?}", pages.len());
+        std::process::exit(if r.is_ok() { 0 } else { 1 });
     }
     if args.first().map(|a| a == "--convert").unwrap_or(false) {
         std::process::exit(cli_convert(&args[1..]));

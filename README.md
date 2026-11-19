@@ -27,7 +27,7 @@ Requirements: Windows 10 or 11, x64.
 
 | Type | View | Edit | Convert to |
 |---|---|---|---|
-| **Images** png, jpg/jpeg, webp, gif (animated), bmp, ico, tif/tiff — plus **HEIC/HEIF, AVIF, JPEG XR, camera RAW** (dng, cr2, cr3, nef, arw…) through Windows' own decoders | zoom (Ctrl + wheel, + / −, 0, 1), transparency checkerboard, animated GIF playback | rotate, mirror, crop (rule of thirds), resize, undo | PNG, JPG (quality), WEBP (lossy or lossless), BMP, TIFF, ICO, GIF |
+| **Images** png, jpg/jpeg, webp, gif (animated), bmp, ico, tif/tiff — plus **HEIC/HEIF, AVIF, JPEG XR, camera RAW** (dng, cr2, cr3, nef, arw…) through Windows' own decoders | zoom (Ctrl + wheel, + / −, 0, 1), transparency checkerboard, animated GIF playback | rotate, mirror, crop (rule of thirds), resize, undo | **PDF** (A4 page per image, 1 cm margins, auto orientation; several images can be merged into one PDF; optional *scanned document* look that removes shadows and whitens the paper — handy for official papers photographed with a phone), PNG, JPG (quality), WEBP (lossy or lossless), BMP, TIFF, ICO, GIF |
 | **PDF** | continuous pages, zoom, remembers the page, **text search (Ctrl+F)** with jump to page and excerpt, copy a page's text | — | PNG / JPG / WEBP (one image per page, ~200 dpi), **TXT**, HTML |
 | **Word** .docx | headings, bold/italic, lists, tables, **embedded images** | — | PDF (**built-in PDF writer, no Microsoft Word needed**, images included; if Word happens to be installed it is used for a pixel-perfect layout), TXT, Markdown, HTML (images embedded) |
 | **Text & code** (txt, md, json, toml, yaml, xml, html, css, js, ts, rs, py, c/cpp, cs, java, go, sh, ps1, sql, lua, gd, srt…) | syntax highlighting, line numbers (correct even with word wrap), current line, **Markdown preview** (Ctrl+E) | full editing, **find / replace** (Ctrl+F / Ctrl+H, match case, replace all), **go to line** (Ctrl+G), Ctrl+S saves the file (previous version kept as a backup) | PDF, HTML, TXT |
@@ -106,6 +106,7 @@ Main crates: `egui` / `egui-winit` / `winit`, `softbuffer` + `hdrshot-egui-backe
 ```
 lecteur-universel --convert webp photo1.png photo2.jpg      # convert without opening a window
 lecteur-universel --cut rapide|precis|720p in.mp4 3 9 out.mp4
+lecteur-universel --assembler-pdf out.pdf [--scan] scan1.jpg scan2.jpg   # images → one PDF
 lecteur-universel --generer-tests tests 5120 1440 60 60     # generate a folder with every supported format
 lecteur-universel --selftest <folder with i.png i.jpg k.rs a.mp3 v.mp4>   # 7 automated editing tests
 ```

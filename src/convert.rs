@@ -87,7 +87,8 @@ impl Target {
             (Target::Jpg, _) => "léger, photos",
             (Target::Webp, _) => "web, très léger",
             (Target::Mp4, _) => "plus léger (H.264)",
-            (Target::Pdf, Kind::Docx) => "via Word si installé",
+            (Target::Pdf, Kind::Docx) => "mise en page intégrée",
+            (Target::Pdf, Kind::Image) => "page A4, à envoyer",
             (Target::Pdf, _) => "document imprimable",
             (Target::Bmp, _) => "brut",
             (Target::Tiff, _) => "impression",
@@ -105,6 +106,7 @@ impl Target {
             Target::Wav | Target::Mp3 => Hub::Pcm,
             Target::Mp4 => Hub::Stream,
             Target::Pdf if k == Kind::Docx => Hub::Doc,
+            Target::Pdf if k == Kind::Image => Hub::Raster,
             Target::Pdf => Hub::Text,
             Target::Gif if k == Kind::Video => Hub::Frames,
             Target::Txt | Target::Md | Target::Html if k == Kind::Docx => Hub::Doc,
@@ -128,7 +130,7 @@ fn decoders(k: Kind) -> &'static [Hub] {
 
 fn encoders(h: Hub) -> &'static [Target] {
     match h {
-        Hub::Raster => &[Target::Png, Target::Jpg, Target::Webp, Target::Bmp, Target::Tiff, Target::Ico, Target::Gif],
+        Hub::Raster => &[Target::Pdf, Target::Png, Target::Jpg, Target::Webp, Target::Bmp, Target::Tiff, Target::Ico, Target::Gif],
         Hub::Pcm => &[Target::Mp3, Target::Wav],
         Hub::Frames => &[Target::Gif],
         Hub::Doc => &[Target::Pdf, Target::Txt, Target::Md, Target::Html],
@@ -145,6 +147,9 @@ pub fn targets(k: Kind, src_ext: &str) -> Vec<Target> {
             if !v.contains(t) && !((t.ext() == src_ext && *t != Target::Mp4) || (src_ext == "jpeg" && *t == Target::Jpg) || (src_ext == "tif" && *t == Target::Tiff)) {
                 // Une image fixe en PNG/JPG depuis une vidéo : seul PNG est utile.
                 if k == Kind::Video && *h == Hub::Raster && *t != Target::Png {
+                    continue;
+                }
+                if *h == Hub::Raster && *t == Target::Pdf && k != Kind::Image {
                     continue;
                 }
                 if k == Kind::Pdf && matches!(t, Target::Ico | Target::Gif | Target::Tiff | Target::Bmp) {
@@ -167,11 +172,14 @@ pub struct Opts {
     pub webp_quality: u8,
     pub mp4_height: u32,
     pub mp4_kbps: u32,
+    /// Image → PDF : rendu « document scanné », et assemblage de plusieurs images en un seul PDF
+    pub pdf_scan: bool,
+    pub pdf_merge: bool,
 }
 
 impl Default for Opts {
     fn default() -> Self {
-        Opts { jpg_quality: 88, mp3_kbps: 192, gif_fps: 12.0, gif_width: 480, pdf_width: 1654, webp_quality: 82, mp4_height: 1080, mp4_kbps: 6000 }
+        Opts { jpg_quality: 88, mp3_kbps: 192, gif_fps: 12.0, gif_width: 480, pdf_width: 1654, webp_quality: 82, mp4_height: 1080, mp4_kbps: 6000, pdf_scan: false, pdf_merge: true }
     }
 }
 
@@ -219,6 +227,11 @@ pub fn run(src: &Source, t: Target, o: &Opts, progress: &dyn Fn(f32)) -> Result<
                 }
             };
             let p = if src.kind == Kind::Video { free_path(&dir, &format!("{stem} {}", crate::kind::hms(src.at).replace(':', "m")), t.ext()) } else { out(t.ext()) };
+            if t == Target::Pdf {
+                crate::pdfgen::images_to_pdf(&[crate::pdfgen::page_of(&img, o.pdf_scan)], &p, 85)?;
+                progress(1.0);
+                return Ok(vec![p]);
+            }
             save_raster(&img, &p, t, o)?;
             progress(1.0);
             Ok(vec![p])

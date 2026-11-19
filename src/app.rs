@@ -1033,6 +1033,27 @@ impl App {
         let opts = self.opts.clone();
         let n = sources.len();
         self.last_out.clear();
+        // Plusieurs images → un seul PDF (dans l'ordre des onglets)
+        if tg == Target::Pdf && n > 1 && opts.pdf_merge && sources.iter().all(|s| s.kind == Kind::Image) {
+            self.start_job(format!("→ PDF ({n} pages)"), move |pr| {
+                let mut pages = Vec::new();
+                for (i, s) in sources.iter().enumerate() {
+                    let img = match &s.image {
+                        Some(i) => i.clone(),
+                        None => crate::wic::open_any(&s.path)?,
+                    };
+                    pages.push(crate::pdfgen::page_of(&img, opts.pdf_scan));
+                    pr((i + 1) as f32 / (n + 1) as f32);
+                }
+                let first = &sources[0].path;
+                let dir = first.parent().unwrap_or(Path::new(".")).to_path_buf();
+                let stem = first.file_stem().unwrap_or_default().to_string_lossy().to_string();
+                let out = kind::free_path(&dir, &format!("{stem} (+{} pages)", n - 1), "pdf");
+                crate::pdfgen::images_to_pdf(&pages, &out, 85)?;
+                Ok(vec![out])
+            });
+            return;
+        }
         self.start_job(format!("→ {}", tg.label()), move |pr| {
             let mut out = Vec::new();
             let mut errs = Vec::new();
