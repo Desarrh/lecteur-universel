@@ -88,3 +88,30 @@ fn encode_heic_inner(img: &image::RgbaImage, out: &std::path::Path) -> Result<()
         Ok(())
     }
 }
+
+/// Aperçu rapide : Windows décode directement à taille réduite (pour un JPEG, la réduction
+/// se fait dans le décodeur : 4 à 8 fois plus rapide qu'un décodage complet).
+/// Renvoie l'image réduite et la taille d'origine.
+pub fn decode_scaled(path: &str, max_side: u32) -> Result<(image::RgbaImage, (u32, u32)), String> {
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let e = |x: windows::core::Error| x.message().to_string();
+        let f: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).map_err(e)?;
+        let dec = f.CreateDecoderFromFilename(&HSTRING::from(path), None, GENERIC_READ, WICDecodeMetadataCacheOnDemand).map_err(e)?;
+        let frame = dec.GetFrame(0).map_err(e)?;
+        let (mut w, mut h) = (0u32, 0u32);
+        frame.GetSize(&mut w, &mut h).map_err(e)?;
+        if w.max(h) <= max_side {
+            return Err("déjà petite".into()); // le décodage complet suffit
+        }
+        let k =(max_side as f64 / w.max(h) as f64).min(1.0);
+        let (nw, nh) = (((w as f64 * k) as u32).max(1), ((h as f64 * k) as u32).max(1));
+        let sc = f.CreateBitmapScaler().map_err(e)?;
+        sc.Initialize(&frame, nw, nh, WICBitmapInterpolationModeFant).map_err(e)?;
+        let conv = f.CreateFormatConverter().map_err(e)?;
+        conv.Initialize(&sc, &GUID_WICPixelFormat32bppRGBA, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeCustom).map_err(e)?;
+        let mut buf = vec![0u8; (nw * nh * 4) as usize];
+        conv.CopyPixels(std::ptr::null(), nw * 4, &mut buf).map_err(e)?;
+        Ok((image::RgbaImage::from_raw(nw, nh, buf).ok_or("image vide")?, (w, h)))
+    }
+}

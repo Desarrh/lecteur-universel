@@ -212,7 +212,7 @@ impl App {
                         ui.separator();
                         ui.label(
                             RichText::new(
-                                "Tab  vue épurée     F  plein écran\nPgPréc / PgSuiv  fichier voisin\nEspace  lecture     ← →  ±5 s\n,  .  image par image\nI  O  début / fin de coupe     X  tout garder\nC  capture vidéo\nCtrl+S  copie     Ctrl+Maj+S  remplacer",
+                                "Tab  vue épurée     F  plein écran\nPgPréc / PgSuiv  fichier voisin\nEspace  lecture     ← →  ±5 s     J  L  ±10 s\n,  .  image par image\nI  O  début / fin de coupe     X  tout garder\nC  capture vidéo\nCtrl+S  copie     Ctrl+Maj+S  remplacer",
                             )
                             .monospace()
                             .size(11.5)
@@ -307,7 +307,7 @@ impl App {
             let mut parts = vec![kind::label(t.kind).to_string(), human_size(t.size)];
             match &t.view {
                 View::Image(v) => {
-                    parts.push(format!("{} × {}", v.img.width(), v.img.height()));
+                    parts.push(format!("{} × {}", v.dims().0, v.dims().1));
                     if v.frames > 1 {
                         parts.push(format!("{} images", v.frames));
                     }
@@ -628,7 +628,7 @@ impl App {
                     }
                 }
                 section(ui, "Taille", &p);
-                ui.label(RichText::new(format!("{} × {} px", v.img.width(), v.img.height())).monospace());
+                ui.label(RichText::new(format!("{} × {} px", v.dims().0, v.dims().1)).monospace());
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;
@@ -1103,8 +1103,17 @@ fn draw_image(ui: &mut Ui, v: &mut ImgV, p: &Palette) {
     if animated && v.anim_tex.is_empty() {
         v.anim_tex = v.anim.iter().enumerate().map(|(i, (ci, _))| ui.ctx().load_texture(format!("gif{i}"), ci.clone(), TextureOptions::LINEAR)).collect();
     }
+    if v.orig.0 == 0 {
+        let r = ui.available_rect_before_wrap();
+        ui.painter().text(r.center(), Align2::CENTER_CENTER, "Chargement…", FontId::proportional(15.0), p.muted);
+        return;
+    }
     if v.dirty || v.tex.is_none() {
-        let ci = ColorImage::from_rgba_unmultiplied([v.img.width() as usize, v.img.height() as usize], v.img.as_raw());
+        // Copie d'affichage préparée dans le fil (≤ 2560 px) ; après une modification, l'image elle-même
+        let ci = match &v.disp {
+            Some(ci) => ci.clone(),
+            None => ColorImage::from_rgba_unmultiplied([v.img.width() as usize, v.img.height() as usize], v.img.as_raw()),
+        };
         v.tex = Some(ui.ctx().load_texture("image", ci, TextureOptions::LINEAR));
         v.dirty = false;
     }
@@ -1126,7 +1135,7 @@ fn draw_image(ui: &mut Ui, v: &mut ImgV, p: &Palette) {
         tex.id()
     };
     let avail = ui.available_rect_before_wrap();
-    let (iw, ih) = (v.img.width() as f32, v.img.height() as f32);
+    let (iw, ih) = (v.dims().0 as f32, v.dims().1 as f32);
     let ppp = ui.ctx().pixels_per_point();
     let fit = ((avail.width() - 40.0) / iw).min((avail.height() - 40.0) / ih).min(2.0 / ppp).max(0.01);
     let scroll = ui.input(|i| if i.modifiers.ctrl { i.smooth_scroll_delta.y } else { 0.0 });

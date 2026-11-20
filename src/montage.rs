@@ -8,7 +8,7 @@ use windows::core::*;
 
 /// Une vignette par position : un « seek » chacune, pas de décodage de toute
 /// la vidéo (rapide même sur un fichier de 2 Go).
-pub fn video_thumbs(path: &str, n: usize, max_side: u32, on_thumb: &dyn Fn(usize, image::RgbaImage)) -> Result<()> {
+pub fn video_thumbs(path: &str, n: usize, max_side: u32, on_thumb: &dyn Fn(usize, image::RgbaImage) -> bool) -> Result<()> {
     unsafe {
         // Le décodeur réduit lui-même l'image (traitement vidéo avancé) : bien plus
         // rapide que convertir une image 2560×720 puis la redimensionner.
@@ -64,7 +64,10 @@ pub fn video_thumbs(path: &str, n: usize, max_side: u32, on_thumb: &dyn Fn(usize
                 let Some(s) = sample else { continue };
                 let img = sample_to_rgba(&s, cw, ch)?;
                 let img = if cw == tw && ch == th { img } else { image::imageops::resize(&img, tw, th, image::imageops::FilterType::Triangle) };
-                on_thumb(i, img);
+                // Faux : plus personne n'attend (onglet fermé) → on arrête tout de suite
+                if !on_thumb(i, img) {
+                    return Ok(());
+                }
                 break;
             }
         }

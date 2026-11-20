@@ -13,12 +13,29 @@ use windows::Win32::UI::Shell::*;
 use windows::core::*;
 
 const PIPE: &str = r"\\.\pipe\lecteur-universel-v1";
+/// Instance d'aperçu, séparée de la fenêtre de travail normale
+const PIPE_APERCU: &str = r"\\.\pipe\lecteur-universel-apercu-v1";
+
+fn pipe(preview: bool) -> &'static str {
+    if preview { PIPE_APERCU } else { PIPE }
+}
 
 /// Si une instance tourne déjà, lui envoie les fichiers et renvoie vrai.
-pub fn forward_to_running(paths: &[PathBuf]) -> bool {
-    match std::fs::OpenOptions::new().write(true).open(PIPE) {
+/// Protocole (UTF-8, une ligne par chemin) : une ligne « \x02 » demande l'aperçu rapide,
+/// un message « \x01 » seul ramène simplement la fenêtre au premier plan.
+pub fn forward_to_running(paths: &[PathBuf], preview: bool) -> bool {
+    match std::fs::OpenOptions::new().write(true).open(pipe(preview)) {
         Ok(mut f) => {
-            let s: Vec<String> = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+            // Ce processus, lancé par la fenêtre au premier plan (l'explorateur), a le droit de prendre
+            // le focus : il le cède à l'instance qui va s'afficher, sinon Windows la laisse derrière
+            // et Échap partirait à l'explorateur.
+            unsafe {
+                let _ = windows::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(u32::MAX);
+            }
+            let mut s: Vec<String> = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+            if preview && !s.is_empty() {
+                s.insert(0, "\u{2}".into());
+            }
             let msg = if s.is_empty() { "\u{1}".to_string() } else { s.join("\n") };
             let _ = f.write_all(msg.as_bytes());
             true
@@ -27,10 +44,10 @@ pub fn forward_to_running(paths: &[PathBuf]) -> bool {
     }
 }
 
-/// Serveur : chaque message reçu est passé à `on_msg` (chemins, vide = « au premier plan »).
-pub fn serve(on_msg: impl Fn(Vec<PathBuf>) + Send + 'static) {
+/// Serveur : chaque message reçu est passé à `on_msg` (chemins, vide = « au premier plan » ; aperçu ?).
+pub fn serve(preview_instance: bool, on_msg: impl Fn(Vec<PathBuf>, bool) + Send + 'static) {
     std::thread::spawn(move || {
-        let name = HSTRING::from(PIPE);
+        let name = HSTRING::from(pipe(preview_instance));
         loop {
             let h: HANDLE = unsafe {
                 CreateNamedPipeW(&name, PIPE_ACCESS_INBOUND, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, PIPE_UNLIMITED_INSTANCES, 0, 65536, 0, None)
@@ -51,8 +68,14 @@ pub fn serve(on_msg: impl Fn(Vec<PathBuf>) + Send + 'static) {
                     data.extend_from_slice(&buf[..n as usize]);
                 }
                 let s = String::from_utf8_lossy(&data);
-                let paths = s.split('\n').filter(|l| !l.is_empty() && *l != "\u{1}").map(PathBuf::from).collect();
-                on_msg(paths);
+                let preview = s.split('\n').any(|l| l.trim_end_matches('\r') == "\u{2}");
+                let paths = s
+                    .split('\n')
+                    .map(|l| l.trim_end_matches('\r'))
+                    .filter(|l| !l.is_empty() && *l != "\u{1}" && *l != "\u{2}")
+                    .map(PathBuf::from)
+                    .collect();
+                on_msg(paths, preview || preview_instance);
             }
             unsafe {
                 let _ = DisconnectNamedPipe(h);

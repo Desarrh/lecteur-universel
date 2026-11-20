@@ -52,10 +52,12 @@ Results are saved next to the original (never overwritten) and can be **dragged*
 | Key | Action |
 |---|---|
 | Space / K | play / pause |
-| ← → (Shift: 1 s) | seek ±5 s |
+| ← → (Shift: 1 s) · J / L | seek ±5 s · ±10 s |
 | , . | previous / next frame |
 | I / O (or [ ]) | trim start / end here — X: keep everything |
-| L | jump back to the start of the selection |
+| Shift+Home | jump back to the start of the selection |
+| Media keys | play / pause, next / previous file — also from the Windows media flyout, even when the window is in the background |
+| Esc · Space (quick preview) | close the preview opened with `--apercu` (separate instance, ← → open the neighbour file) |
 | C | capture the current video frame |
 | V · G / H | subtitles on/off · subtitle offset −/+ 0.1 s |
 | Ctrl+F · Ctrl+H · Ctrl+G · Ctrl+E | find · replace · go to line · Markdown preview (text, code; Ctrl+F also searches PDFs) |

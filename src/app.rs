@@ -74,6 +74,69 @@ struct ImgV {
     anim: Vec<(ColorImage, f32)>,
     anim_tex: Vec<TextureHandle>,
     anim_t0: Instant,
+    /// Chargement en arrière-plan : aperçu réduit d'abord, pleine définition ensuite
+    pending: Option<Receiver<ImgMsg>>,
+    /// Vrai quand `img` est en pleine définition (les modifications attendent ce moment)
+    full: bool,
+    /// Image d'affichage déjà prête pour la texture (≤ 2560 px, préparée dans le fil),
+    /// absente après une modification
+    disp: Option<ColorImage>,
+}
+
+impl ImgV {
+    /// Taille affichée : réelle une fois chargée (modifications comprises), d'origine pendant le chargement.
+    fn dims(&self) -> (u32, u32) {
+        if self.full { self.img.dimensions() } else { self.orig }
+    }
+}
+
+enum ImgMsg {
+    Preview(ColorImage, (u32, u32)),
+    Full(image::RgbaImage, ColorImage, Vec<(ColorImage, f32)>),
+    Err(String),
+}
+
+/// Image prête pour une texture, réduite à 2560 px au plus (préparée hors du fil d'affichage).
+fn display_copy(img: &image::RgbaImage) -> ColorImage {
+    let m = img.width().max(img.height());
+    if m > 2560 {
+        let k = 2560.0 / m as f32;
+        let r = image::imageops::resize(img, ((img.width() as f32 * k) as u32).max(1), ((img.height() as f32 * k) as u32).max(1), image::imageops::FilterType::Triangle);
+        ColorImage::from_rgba_unmultiplied([r.width() as usize, r.height() as usize], r.as_raw())
+    } else {
+        ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw())
+    }
+}
+
+/// Décode une image dans un fil : aperçu rapide (gros JPEG), puis pleine définition
+/// et copie réduite pour l'écran.
+fn spawn_image_load(path: PathBuf, wake: Arc<dyn Fn() + Send + Sync>) -> Receiver<ImgMsg> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let ext = kind::ext(&path);
+        let big = std::fs::metadata(&path).map(|m| m.len() > 300_000).unwrap_or(false);
+        if big && matches!(ext.as_str(), "jpg" | "jpeg" | "jfif" | "heic" | "heif" | "avif" | "tif" | "tiff") {
+            if let Ok((img, orig)) = crate::wic::decode_scaled(&path.to_string_lossy(), 2560) {
+                if orig.0.max(orig.1) > 2560 {
+                    let ci = ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
+                    let _ = tx.send(ImgMsg::Preview(ci, orig));
+                    wake();
+                }
+            }
+        }
+        match crate::wic::open_any(&path) {
+            Ok(img) => {
+                let disp = display_copy(&img);
+                let anim = if ext == "gif" { load_gif(&path) } else { Vec::new() };
+                let _ = tx.send(ImgMsg::Full(img, disp, anim));
+            }
+            Err(e) => {
+                let _ = tx.send(ImgMsg::Err(e));
+            }
+        }
+        wake();
+    });
+    rx
 }
 
 struct TxtV {
@@ -229,6 +292,26 @@ pub struct App {
     upd_installing: bool,
     /// Demande de fermeture (après installation d'une mise à jour)
     pub want_exit: bool,
+    /// Aperçu rapide en cours (Espace dans l'Explorateur) : Échap le referme
+    preview: Option<Preview>,
+    /// Instance dédiée à l'aperçu (lancée par --apercu) : un seul fichier à la fois
+    pub preview_only: bool,
+    /// Une vidéo a été ouverte : le pilote graphique est chargé dans le processus (≈ 90 Mo
+    /// que Windows ne rend jamais) → l'instance d'aperçu se recycle en se cachant.
+    pub video_used: bool,
+    /// Aperçu refermé : masquer la fenêtre (plus d'onglet) ou la réduire ; l'instance reste prête
+    pub want_hide: bool,
+}
+
+/// État à rétablir quand l'aperçu rapide se ferme.
+struct Preview {
+    path: PathBuf,
+    /// Faux si le fichier était déjà ouvert : Échap ne ferme alors pas son onglet
+    own_tab: bool,
+    prev_active: usize,
+    prev_panels: bool,
+    /// La fenêtre était cachée ou réduite avant l'aperçu : elle le redevient
+    hide_after: bool,
 }
 
 impl App {
@@ -268,6 +351,10 @@ impl App {
             upd_hidden: false,
             upd_installing: false,
             want_exit: false,
+            preview: None,
+            preview_only: false,
+            video_used: false,
+            want_hide: false,
             title: "Lecteur universel".into(),
             s,
         }
@@ -375,7 +462,7 @@ impl App {
         let Some(t) = self.tabs.get(self.active) else { return "accueil".into() };
         let d = match &t.view {
             View::Error(e) => return format!("ERREUR {e}"),
-            View::Image(v) => format!("{}x{} images={}", v.img.width(), v.img.height(), v.frames),
+            View::Image(v) => format!("{}x{} images={}{}", v.dims().0, v.dims().1, v.frames, if v.full { "" } else { " (chargement)" }),
             View::Text(v) => format!("{} lignes", v.text.lines().count()),
             View::Docx(b) => format!("{} blocs", b.len()),
             View::Pdf(v) => match &v.err {
@@ -418,6 +505,90 @@ impl App {
         self.last_out.clear();
     }
 
+    /// Aperçu rapide : ouvre le fichier en vue épurée ; Échap (ou Espace hors vidéo) le referme
+    /// et rend la main à l'Explorateur. Un nouvel aperçu remplace le précédent.
+    pub fn open_preview(&mut self, ctx: &egui::Context, path: PathBuf, hide_after: bool) {
+        let (mut prev_active, mut prev_panels, mut hide_after) = (self.active, self.panels, hide_after);
+        if let Some(old) = self.preview.take() {
+            (prev_active, prev_panels, hide_after) = (old.prev_active, old.prev_panels, old.hide_after);
+            if old.own_tab {
+                if let Some(i) = self.tabs.iter().position(|t| t.path == old.path) {
+                    if !self.tabs[i].dirty() {
+                        self.close(i);
+                    }
+                }
+            }
+        }
+        if self.preview_only {
+            for i in (0..self.tabs.len()).rev() {
+                if !self.tabs[i].dirty() {
+                    self.close(i);
+                }
+            }
+        }
+        let had = self.tabs.len();
+        self.open_paths(ctx, vec![path]);
+        let Some(t) = self.tabs.get(self.active) else { return };
+        self.preview = Some(Preview { path: t.path.clone(), own_tab: self.tabs.len() > had, prev_active, prev_panels, hide_after });
+        self.panels = false;
+    }
+
+    pub fn close_preview(&mut self) {
+        if self.preview_only {
+            // Instance d'aperçu : tout fermer (fichiers voisins compris) puis cacher
+            self.preview = None;
+            for i in (0..self.tabs.len()).rev() {
+                self.close(i);
+            }
+            self.want_hide = self.tabs.is_empty();
+            return;
+        }
+        let Some(pv) = self.preview.take() else { return };
+        if pv.own_tab {
+            if let Some(i) = self.tabs.iter().position(|t| t.path == pv.path) {
+                self.close(i);
+                if self.tabs.iter().any(|t| t.path == pv.path) {
+                    // modifications non enregistrées : on garde l'onglet (le toast l'explique)
+                    self.preview = Some(pv);
+                    return;
+                }
+            }
+        }
+        self.panels = pv.prev_panels;
+        if pv.prev_active < self.tabs.len() {
+            self.active = pv.prev_active;
+        }
+        self.want_hide = self.tabs.is_empty() || pv.hide_after;
+    }
+
+    /// Son ou vidéo de l'onglet actif, pour le panneau multimédia de Windows.
+    pub fn media_now(&self) -> Option<crate::smtc::Now<'_>> {
+        let t = self.tabs.get(self.active)?;
+        let View::Media(m) = &t.view else { return None };
+        let p = m.p.as_ref()?;
+        Some(crate::smtc::Now { id: t.path.to_str()?, title: t.path.file_name()?.to_str()?, video: t.kind == Kind::Video, playing: p.playing() })
+    }
+
+    /// Touche multimédia (ou bouton du panneau Windows) : lecture/pause, fichier suivant/précédent.
+    pub fn media_button(&mut self, ctx: &egui::Context, b: crate::smtc::Btn) {
+        use crate::smtc::Btn;
+        match b {
+            Btn::PlayPause => {
+                if let Some(View::Media(m)) = self.tabs.get_mut(self.active).map(|t| &mut t.view) {
+                    if let Some(p) = m.p.as_mut() {
+                        p.toggle();
+                    }
+                }
+            }
+            Btn::Next => self.neighbour(ctx, 1),
+            Btn::Previous => self.neighbour(ctx, -1),
+        }
+    }
+
+    pub fn has_tabs(&self) -> bool {
+        !self.tabs.is_empty()
+    }
+
     /// Attache des sous-titres à l'onglet vidéo actif. Faux s'il n'y a pas de vidéo active.
     fn attach_subs(&mut self, p: &Path) -> bool {
         let Some(t) = self.tabs.get_mut(self.active) else { return false };
@@ -448,32 +619,30 @@ impl App {
     fn load(&mut self, ctx: &egui::Context, path: PathBuf, autoplay: bool) -> Tab {
         self.remember(&path);
         let k = kind::of(&path);
+        self.video_used |= k == Kind::Video;
         let meta = std::fs::metadata(&path).ok();
         let ps = path.to_string_lossy().to_string();
         let restore = self.s.positions.get(&ps).copied();
         let view = match k {
-            Kind::Image => match crate::wic::open_any(&path) {
-                Ok(img) => {
-                    let anim = if kind::ext(&path) == "gif" { load_gif(&path) } else { Vec::new() };
-                    let frames = anim.len().max(1);
-                    View::Image(Box::new(ImgV {
-                        orig: img.dimensions(),
-                        img,
-                        tex: None,
-                        dirty: true,
-                        zoom: None,
-                        crop: false,
-                        crop_rect: None,
-                        undo: Vec::new(),
-                        history: Vec::new(),
-                        frames,
-                        anim,
-                        anim_tex: Vec::new(),
-                        anim_t0: Instant::now(),
-                    }))
-                }
-                Err(e) => View::Error(format!("Image illisible : {e}")),
-            },
+            // Rien n'est décodé ici : l'onglet apparaît tout de suite, l'image arrive du fil.
+            Kind::Image => View::Image(Box::new(ImgV {
+                orig: (0, 0),
+                img: image::RgbaImage::new(1, 1),
+                tex: None,
+                dirty: false,
+                zoom: None,
+                crop: false,
+                crop_rect: None,
+                undo: Vec::new(),
+                history: Vec::new(),
+                frames: 1,
+                anim: Vec::new(),
+                anim_tex: Vec::new(),
+                anim_t0: Instant::now(),
+                pending: Some(spawn_image_load(path.clone(), self.wake.clone())),
+                full: false,
+                disp: None,
+            })),
             Kind::Text | Kind::Unknown => {
                 const MAX: usize = 8 << 20;
                 match std::fs::read(&path) {
@@ -523,7 +692,10 @@ impl App {
                 let audio = k == Kind::Audio;
                 let vw = if audio { None } else { self.parent_hwnd.and_then(crate::vidwin::VideoWindow::new) };
                 let hw = vw.as_ref().map(|v| v.hwnd.0 as isize);
-                let (p, err) = match Player::open(&ps, audio, self.wake.clone(), hw) {
+                crate::trace("lecteur média : ouverture");
+                let opened = Player::open(&ps, audio, self.wake.clone(), hw);
+                crate::trace("lecteur média : ouvert");
+                let (p, err) = match opened {
                     Ok(mut p) => {
                         p.set_volume(self.s.volume.unwrap_or(1.0));
                         (Some(p), None)
@@ -747,8 +919,9 @@ impl App {
                         std::thread::spawn(move || {
                             crate::media::init_thread();
                             let _ = crate::montage::video_thumbs(&ps, N, 200, &|i, img| {
-                                let _ = tx.send((i, img));
+                                let alive = tx.send((i, img)).is_ok();
                                 wake();
+                                alive
                             });
                         });
                     }
@@ -785,6 +958,36 @@ impl App {
                         ctx.request_repaint_after(std::time::Duration::from_millis(ms));
                     } else if p.has_video && m.frame.is_none() {
                         ctx.request_repaint_after(std::time::Duration::from_millis(50));
+                    }
+                }
+                View::Image(v) => {
+                    let mut err = None;
+                    if let Some(rx) = &v.pending {
+                        while let Ok(m) = rx.try_recv() {
+                            match m {
+                                ImgMsg::Preview(ci, orig) => {
+                                    v.disp = Some(ci);
+                                    v.orig = orig;
+                                    v.dirty = true;
+                                }
+                                ImgMsg::Full(img, disp, anim) => {
+                                    v.orig = img.dimensions();
+                                    v.img = img;
+                                    v.disp = Some(disp);
+                                    v.frames = anim.len().max(1);
+                                    v.anim = anim;
+                                    v.full = true;
+                                    v.dirty = true;
+                                }
+                                ImgMsg::Err(e) => err = Some(e),
+                            }
+                        }
+                        if v.full {
+                            v.pending = None;
+                        }
+                    }
+                    if let Some(e) = err {
+                        t.view = View::Error(format!("Image illisible : {e}"));
                     }
                 }
                 View::Pdf(v) => {
@@ -869,15 +1072,35 @@ impl App {
             self.want_fullscreen = Some(!self.fullscreen);
         }
         if pressed(Key::Escape) {
+            let cropping = matches!(self.tabs.get(self.active).map(|t| &t.view), Some(View::Image(v)) if v.crop);
             if self.fullscreen {
                 self.want_fullscreen = Some(false);
-            } else if let Some(View::Image(v)) = self.tabs.get_mut(self.active).map(|t| &mut t.view) {
-                v.crop = false;
-                v.crop_rect = None;
+            } else if cropping {
+                if let Some(View::Image(v)) = self.tabs.get_mut(self.active).map(|t| &mut t.view) {
+                    v.crop = false;
+                    v.crop_rect = None;
+                }
+            } else if (self.preview.is_some() || self.preview_only) && !typing {
+                self.close_preview();
+                return;
             }
         }
         if typing {
             return;
+        }
+        // Aperçu : Espace referme aussi (comme l'aperçu de macOS) ; la lecture se fait au clic ou par K.
+        // ← → ouvrent le fichier voisin (J / L avancent dans une vidéo).
+        if self.preview.is_some() || self.preview_only {
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Space)) {
+                self.close_preview();
+                return;
+            }
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowRight)) {
+                self.neighbour(ctx, 1);
+            }
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowLeft)) {
+                self.neighbour(ctx, -1);
+            }
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Tab)) {
             self.panels = !self.panels;
@@ -928,7 +1151,13 @@ impl App {
                 if pressed(Key::Comma) {
                     p.step(false);
                 }
-                if pressed(Key::Home) {
+                if pressed(Key::J) {
+                    p.seek(p.time() - 10.0);
+                }
+                if pressed(Key::L) {
+                    p.seek(p.time() + 10.0);
+                }
+                if pressed(Key::Home) && !shift {
                     p.seek(0.0);
                 }
                 let now = p.time();
@@ -942,8 +1171,8 @@ impl App {
                 if pressed(Key::X) && !ctrl {
                     t.sel = (None, None);
                 }
-                if pressed(Key::L) {
-                    // Boucle : revient au début de la sélection
+                if pressed(Key::Home) && shift {
+                    // Revient au début de la sélection
                     if let Some((a, _)) = t.range() {
                         if let Some(p) = t.player() {
                             p.seek(a);
@@ -1159,6 +1388,11 @@ impl App {
 
     fn edit_image(&mut self, what: &str) {
         let Some(View::Image(v)) = self.tabs.get_mut(self.active).map(|t| &mut t.view) else { return };
+        if !v.full {
+            self.toast = Some(("Image encore en chargement…".into(), true, Instant::now()));
+            return;
+        }
+        v.disp = None;
         use image::imageops as op;
         let new = match what {
             "Pivoter à gauche" => op::rotate270(&v.img),
@@ -1335,6 +1569,13 @@ impl App {
         let mut res = Vec::new();
         // 1. Image : pivoter + enregistrer une copie
         a.open_paths(ctx, vec![dir.join("i.png")]);
+        for _ in 0..200 {
+            a.tick(ctx);
+            if matches!(a.tabs.get(a.active).map(|t| &t.view), Some(View::Image(v)) if v.full) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         a.edit_image("Pivoter à droite");
         a.save_current(false);
         let dims = image::image_dimensions(dir.join("i (modifié).png")).ok();
@@ -1391,6 +1632,13 @@ impl App {
         res.push(("Capture vidéo PNG".into(), cd == Some((1080, 1920)), format!("{cd:?}")));
         // 5. Conversion par lot : 2 images → WEBP
         a.open_paths(ctx, vec![dir.join("i.jpg")]);
+        for _ in 0..200 {
+            a.tick(ctx);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            if matches!(a.tabs.get(a.active).map(|t| &t.view), Some(View::Image(v)) if v.full) {
+                break;
+            }
+        }
         let imgs: Vec<usize> = a.tabs.iter().enumerate().filter(|(_, t)| t.kind == Kind::Image).map(|(i, _)| i).collect();
         a.start_convert(Target::Webp, imgs.clone());
         let r = a.wait_job();

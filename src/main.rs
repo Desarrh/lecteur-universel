@@ -10,6 +10,7 @@ mod kind;
 mod media;
 mod montage;
 mod pdfgen;
+mod smtc;
 mod subs;
 mod testgen;
 mod update;
@@ -18,6 +19,19 @@ mod pdf;
 mod theme;
 mod wic;
 mod winx;
+
+/// Mesure du démarrage (LECTEUR_TRACE=1) : ms depuis le lancement du processus.
+static T0: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+pub fn trace(what: &str) {
+    // LECTEUR_TRACE=<fichier> : ajout direct dans le fichier (pas de console : trop lente à mesurer)
+    if let Some(f) = std::env::var_os("LECTEUR_TRACE") {
+        use std::io::Write;
+        let ms = T0.get().map(|t| t.elapsed().as_secs_f64() * 1000.0).unwrap_or(0.0);
+        if let Ok(mut fh) = std::fs::OpenOptions::new().create(true).append(true).open(f) {
+            let _ = writeln!(fh, "[{ms:7.1} ms] {what}");
+        }
+    }
+}
 
 use egui_software_backend::{BufferMutRef, ColorFieldOrder, EguiSoftwareRender};
 use std::num::NonZeroU32;
@@ -42,7 +56,10 @@ struct Gfx {
 
 enum UserEvent {
     RepaintAt(Instant),
-    Open(Vec<PathBuf>),
+    /// Fichiers reçus par le tube ; vrai = aperçu rapide
+    Open(Vec<PathBuf>, bool),
+    /// Touche multimédia / panneau multimédia de Windows
+    Media(smtc::Btn),
 }
 
 struct Runner {
@@ -52,12 +69,24 @@ struct Runner {
     settings: Option<app::Settings>,
     next_repaint: Option<Instant>,
     launch: Vec<PathBuf>,
+    /// Lancé avec --apercu
+    launch_preview: bool,
+    /// --apercu-veille : instance d'aperçu neuve, fenêtre cachée dès le départ
+    standby: bool,
+    /// Fenêtre masquée après un aperçu : l'instance reste prête 10 min puis se ferme
+    hidden_since: Option<Instant>,
+    proxy: winit::event_loop::EventLoopProxy<UserEvent>,
+    /// Panneau multimédia de Windows, créé au premier son ou vidéo (rien à payer sinon)
+    smtc: Option<smtc::Smtc>,
+    smtc_tried: bool,
+    smtc_soon: bool,
     title: String,
     started: Instant,
     /// Mode test : actions souris/clavier rejouées (LECTEUR_EVENTS), en points logiques.
     script: Vec<(u64, String)>,
     script_pos: egui::Pos2,
     fps: (Instant, u64, u64),
+    first_paints: u32,
     prof: (f64, f64, f64),
     eng: (u64, u64),
 }
@@ -109,6 +138,24 @@ impl Runner {
         // epaint exige que les deltas de textures soient « consommés » (sinon panique en debug).
         let mut tdelta = std::mem::take(&mut out.textures_delta);
         app.sync_video(out.pixels_per_point);
+        let now = app.media_now();
+        // Créé à l'image suivante (≈ 45 ms dans un processus neuf) : la 1re image du fichier passe avant.
+        if now.is_some() && !self.smtc_tried && !self.smtc_soon {
+            self.smtc_soon = true;
+            self.ctx.request_repaint();
+        } else if now.is_some() && !self.smtc_tried {
+            self.smtc_tried = true;
+            if let Some(h) = app.parent_hwnd {
+                let px = self.proxy.clone();
+                self.smtc = smtc::Smtc::new(h, move |b| {
+                    let _ = px.send_event(UserEvent::Media(b));
+                });
+                trace("panneau multimédia prêt");
+            }
+        }
+        if let Some(s) = self.smtc.as_mut() {
+            s.update(now);
+        }
         gfx.egui.handle_platform_output(&gfx.window, out.platform_output);
         let prims = self.ctx.tessellate(out.shapes, out.pixels_per_point);
 
@@ -192,6 +239,10 @@ impl Runner {
         let t_draw = t_start.elapsed().as_secs_f64();
         tdelta.clear();
         let _ = buf.present();
+        if self.first_paints < 3 {
+            self.first_paints += 1;
+            trace(&format!("image {} affichée", self.first_paints));
+        }
         let t_all = t_start.elapsed().as_secs_f64();
         self.prof.0 += t_ui;
         self.prof.1 += t_draw - t_ui;
@@ -231,6 +282,9 @@ impl Runner {
     }
 
     fn save(&mut self) {
+        if self.launch_preview {
+            return; // l'instance d'aperçu ne touche pas aux réglages de la fenêtre de travail
+        }
         if let Some(app) = self.app.as_mut() {
             let mut s = app.save_state();
             if let Some(g) = &self.gfx {
@@ -259,15 +313,20 @@ impl ApplicationHandler<UserEvent> for Runner {
             .with_title("Lecteur universel")
             .with_inner_size(LogicalSize::new(w.max(640.0), h.max(420.0)))
             .with_min_inner_size(LogicalSize::new(720.0, 480.0))
-            .with_window_icon(window_icon());
+            .with_window_icon(window_icon())
+            .with_visible(!self.standby);
+        trace("resumed");
         let window = Rc::new(el.create_window(attrs).expect("création de la fenêtre"));
+        trace("fenêtre créée");
         let context = softbuffer::Context::new(window.clone()).expect("softbuffer");
         let surface = softbuffer::Surface::new(&context, window.clone()).expect("surface");
         let egui = egui_winit::State::new(self.ctx.clone(), egui::ViewportId::ROOT, &*window, Some(window.scale_factor() as f32), None, Some(8192));
         let renderer = EguiSoftwareRender::new(ColorFieldOrder::Bgra);
         if self.app.is_none() {
             let s = self.settings.take().unwrap_or_default();
+            trace("avant App::new");
             let mut a = app::App::new(&self.ctx, s);
+            trace("App::new (polices, thème)");
             {
                 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
                 if let Ok(h) = window.window_handle() {
@@ -279,11 +338,20 @@ impl ApplicationHandler<UserEvent> for Runner {
             if !self.launch.is_empty() {
                 // Ouvert depuis l'Explorateur : vue épurée, rien autour du contenu.
                 a.panels = false;
-                let l = std::mem::take(&mut self.launch);
-                a.open_paths(&self.ctx, l);
+                let mut l = std::mem::take(&mut self.launch);
+                if self.launch_preview {
+                    // Premier lancement en aperçu : Échap masquera la fenêtre (instance gardée)
+                    a.open_preview(&self.ctx, l.remove(0), true);
+                } else {
+                    a.open_paths(&self.ctx, l);
+                }
+                trace("fichier chargé");
             }
             a.test_env(&self.ctx);
-            a.auto_update_check();
+            a.preview_only = self.launch_preview;
+            if !self.launch_preview {
+                a.auto_update_check();
+            }
             if std::env::var("LECTEUR_PANELS").is_ok() {
                 a.panels = true;
             }
@@ -291,6 +359,17 @@ impl ApplicationHandler<UserEvent> for Runner {
         }
         window.request_redraw();
         self.gfx = Some(Gfx { window, egui, _context: context, surface, renderer });
+        if self.standby {
+            // Instance de veille : une image dessinée fenêtre cachée prépare polices, atlas et
+            // surface, pour que le prochain aperçu s'affiche aussi vite qu'une instance déjà servie.
+            self.paint();
+            self.paint();
+            unsafe {
+                use windows::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
+                let _ = SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
+            }
+            trace("veille : préchauffée");
+        }
     }
 
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -298,8 +377,16 @@ impl ApplicationHandler<UserEvent> for Runner {
         let resp = gfx.egui.on_window_event(&gfx.window, &event);
         match event {
             WindowEvent::CloseRequested => {
-                self.save();
-                el.exit();
+                if self.launch_preview {
+                    // Instance d'aperçu : fermer = cacher, prête pour l'appui suivant
+                    if let Some(a) = self.app.as_mut() {
+                        a.close_preview();
+                    }
+                    gfx.window.request_redraw();
+                } else {
+                    self.save();
+                    el.exit();
+                }
             }
             WindowEvent::RedrawRequested => self.paint(),
             WindowEvent::HoveredFile(_) => {
@@ -340,11 +427,29 @@ impl ApplicationHandler<UserEvent> for Runner {
                     self.next_repaint = Some(self.next_repaint.map_or(t, |n| n.min(t)));
                 }
             }
-            UserEvent::Open(paths) => {
+            UserEvent::Media(b) => {
                 if let Some(a) = self.app.as_mut() {
-                    a.open_paths(&self.ctx, paths);
+                    a.media_button(&self.ctx, b);
                 }
                 if let Some(g) = &self.gfx {
+                    g.window.request_redraw();
+                }
+            }
+            UserEvent::Open(mut paths, preview) => {
+                trace("tube : message reçu par la boucle");
+                let hidden = self.gfx.as_ref().is_some_and(|g| !g.window.is_visible().unwrap_or(true) || g.window.is_minimized().unwrap_or(false));
+                if let Some(a) = self.app.as_mut() {
+                    if preview && !paths.is_empty() {
+                        a.open_preview(&self.ctx, paths.remove(0), hidden);
+                    } else {
+                        a.open_paths(&self.ctx, paths);
+                    }
+                }
+                trace("tube : fichier chargé");
+                self.first_paints = 0;
+                self.hidden_since = None;
+                if let Some(g) = &self.gfx {
+                    g.window.set_visible(true);
                     g.window.set_minimized(false);
                     g.window.focus_window();
                     g.window.request_redraw();
@@ -358,6 +463,54 @@ impl ApplicationHandler<UserEvent> for Runner {
             self.save();
             el.exit();
             return;
+        }
+        // Aperçu refermé : la fenêtre disparaît mais l'instance reste prête (ouverture suivante instantanée)
+        if let Some(a) = self.app.as_mut().filter(|a| a.want_hide) {
+            a.want_hide = false;
+            let empty = !a.has_tabs();
+            if let Some(g) = &self.gfx {
+                if empty {
+                    g.window.set_visible(false);
+                    self.hidden_since = Some(Instant::now());
+                } else {
+                    g.window.set_minimized(true);
+                }
+            }
+            if empty && self.launch_preview && self.app.as_ref().is_some_and(|a| a.video_used) {
+                // Après une vidéo, le pilote graphique reste chargé (≈ 90 Mo que Windows ne rend
+                // pas). On passe la main à une instance de veille neuve et légère, puis on quitte.
+                if let Ok(exe) = std::env::current_exe() {
+                    if std::process::Command::new(exe).arg("--apercu-veille").spawn().is_ok() {
+                        trace("aperçu recyclé (vidéo vue)");
+                        // Sortie immédiate : le démontage de Media Foundation prend plus d'une seconde,
+                        // pendant laquelle ce processus capterait encore l'aperçu suivant.
+                        std::process::exit(0);
+                    }
+                }
+            }
+            if empty {
+                // egui ne libère les textures qu'à l'image suivante : deux images « à vide » une fois
+                // cachée, puis on rend la mémoire au système (veille légère).
+                self.paint();
+                self.paint();
+                unsafe {
+                    use windows::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
+                    let _ = SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
+                }
+                trace("aperçu caché, mémoire rendue");
+            }
+            self.save();
+        }
+        const RESIDENT: std::time::Duration = std::time::Duration::from_secs(600);
+        if let Some(h) = self.hidden_since {
+            if h.elapsed() >= RESIDENT {
+                el.exit();
+                return;
+            }
+            el.set_control_flow(ControlFlow::WaitUntil(self.next_repaint.map_or(h + RESIDENT, |n| n.min(h + RESIDENT))));
+            if self.next_repaint.is_none_or(|t| t > Instant::now()) {
+                return;
+            }
         }
         match self.next_repaint {
             Some(t) if t <= Instant::now() => {
@@ -413,6 +566,8 @@ fn cli_convert(args: &[String]) -> i32 {
 }
 
 fn main() {
+    let _ = T0.set(Instant::now());
+    trace("main");
     update::cleanup_old();
     let args: Vec<String> = std::env::args().skip(1).collect();
     // Relance après mise à jour : on laisse l'ancienne instance se fermer.
@@ -458,7 +613,7 @@ fn main() {
     if args.first().map(|a| a == "--thumbs").unwrap_or(false) && args.len() > 1 {
         media::init_thread();
         let t0 = std::time::Instant::now();
-        let r = montage::video_thumbs(&args[1], 40, 200, &|i, img| println!("{i} {}x{} {:?}", img.width(), img.height(), t0.elapsed()));
+        let r = montage::video_thumbs(&args[1], 40, 200, &|i, img| { println!("{i} {}x{} {:?}", img.width(), img.height(), t0.elapsed()); true });
         println!("{r:?} {:?}", t0.elapsed());
         return;
     }
@@ -480,12 +635,17 @@ fn main() {
         std::process::exit(cli_convert(&args[1..]));
     }
     let launch: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).filter(|p| p.exists()).collect();
+    // --apercu : aperçu rapide (Espace dans l'Explorateur), Échap le referme
+    let standby = args.iter().any(|a| a == "--apercu-veille");
+    let launch_preview = (args.iter().any(|a| a == "--apercu") && !launch.is_empty()) || standby;
     // Instance unique : un 2ᵉ lancement ajoute un onglet dans la fenêtre existante.
     let test_mode = std::env::var("LECTEUR_SHOT").is_ok() || std::env::var("LECTEUR_SOLO").is_ok();
-    if !test_mode && !after_update && winx::forward_to_running(&launch) {
+    if !test_mode && !after_update && !standby && winx::forward_to_running(&launch, launch_preview) {
         return;
     }
+    trace("avant MFStartup");
     media::init_main();
+    trace("MFStartup");
     let event_loop = EventLoop::<UserEvent>::with_user_event().build().expect("boucle d'événements");
     let proxy = event_loop.create_proxy();
     let ctx = egui::Context::default();
@@ -495,11 +655,12 @@ fn main() {
     });
     let p3 = proxy.clone();
     if !test_mode {
-        winx::serve(move |paths| {
-            let _ = p3.send_event(UserEvent::Open(paths));
+        winx::serve(launch_preview, move |paths, preview| {
+            trace("tube : message lu");
+            let _ = p3.send_event(UserEvent::Open(paths, preview));
         });
     }
-    let mut runner = Runner { ctx, gfx: None, app: None, settings: Some(app::Settings::load()), next_repaint: None, launch,
+    let mut runner = Runner { ctx, gfx: None, app: None, settings: Some(app::Settings::load()), next_repaint: None, launch, launch_preview, standby, hidden_since: standby.then(Instant::now), proxy: proxy.clone(), smtc: None, smtc_tried: false, smtc_soon: false,
         title: String::new(),
         started: Instant::now(),
         script: std::env::var("LECTEUR_EVENTS")
@@ -507,6 +668,7 @@ fn main() {
             .unwrap_or_default(),
         script_pos: egui::Pos2::ZERO,
         fps: (Instant::now(), 0, 0),
+        first_paints: 0,
         prof: (0.0, 0.0, 0.0),
         eng: (0, 0),
     };
