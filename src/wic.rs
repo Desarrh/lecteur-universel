@@ -9,17 +9,7 @@ use windows::core::HSTRING;
 /// Décode n'importe quelle image lisible par le socle : `image` d'abord, puis PSD, RAW, SVG, EXR,
 /// JXL en Rust, et WIC (HEIC, AVIF, JXR…) en repli, avec un message clair s'il manque une extension.
 pub fn open_any(path: &std::path::Path) -> Result<image::RgbaImage, String> {
-    socle::images::decode(path, &socle::Cancel::new()).or_else(|e| by_extension(path).ok_or(e))
-}
-
-/// Secours : format donné par l'extension (un TGA non compressé commence comme un curseur .cur,
-/// que la détection par en-tête du socle prend pour une icône).
-fn by_extension(path: &std::path::Path) -> Option<image::RgbaImage> {
-    let fmt = image::ImageFormat::from_path(path).ok()?;
-    let r = image::ImageReader::open(path).ok()?;
-    let mut r = r;
-    r.set_format(fmt);
-    r.decode().ok().map(|i| i.to_rgba8())
+    socle::images::decode(path, &socle::Cancel::new())
 }
 
 /// Encode en HEIC avec l'encodeur de Windows (extension HEIF requise) — sert aux fichiers de test.

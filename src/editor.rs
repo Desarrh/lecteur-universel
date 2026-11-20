@@ -215,7 +215,6 @@ pub fn show(ui: &mut Ui, text: &mut String, lang: &str, wrap: &mut bool, st: &mu
                 let fid = egui::Id::unique("find_field");
                 let ar = st.sac.field(ui, p, fid, &mut st.find, "Rechercher", 240.0, hist);
                 let r = ar.response.clone();
-                ui.add_space(26.0); // le cadre du champ déborde à droite de sa zone
                 if st.focus_find {
                     r.request_focus();
                     st.focus_find = false;

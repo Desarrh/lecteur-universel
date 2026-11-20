@@ -335,7 +335,8 @@ struct Preview {
 impl App {
     pub fn new(ctx: &egui::Context, s: Settings) -> App {
         let pal = theme::palette(s.dark);
-        theme::install_fonts(ctx);
+        // Gras pour les titres (Word, Markdown, sous-titres) ; pas d'emoji (13 Mo de RAM)
+        theme::install_fonts_with(ctx, theme::FontOptions { bold: true, ..Default::default() });
         theme::apply(ctx, &pal);
         let c2 = ctx.clone();
         App {

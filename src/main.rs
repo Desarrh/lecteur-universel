@@ -26,7 +26,7 @@ mod winx;
 /// Automatique avec LECTEUR_SHOT / LECTEUR_SOLO, ou forcé par LECTEUR_DISCRET=1.
 pub fn discret() -> bool {
     static D: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *D.get_or_init(|| ["LECTEUR_SHOT", "LECTEUR_SOLO", "LECTEUR_DISCRET"].iter().any(|k| std::env::var_os(k).is_some()))
+    *D.get_or_init(|| ["LECTEUR_SHOT", "LECTEUR_SOLO", "LECTEUR_DISCRET", "SOCLE_TEST"].iter().any(|k| std::env::var_os(k).is_some()))
 }
 
 /// Mesure du démarrage (LECTEUR_TRACE=1) : ms depuis le lancement du processus.
@@ -110,11 +110,9 @@ impl Runner {
 
         let t_start = Instant::now();
         let mut raw = gfx.egui.take_egui_input(&gfx.window);
-        if std::env::var_os("LECTEUR_EVENTS").is_some() {
-            // Test scripté : la fenêtre invisible n'est jamais active (règle n°0) ; egui la croit
-            // quand même au premier plan pour que les champs gardent le focus clavier.
-            raw.focused = true;
-        }
+        // Test : la fenêtre invisible n'est jamais active (règle n°0) ; le socle fait croire à egui
+        // qu'elle a le focus pour que les champs gardent le clavier pendant un test scripté.
+        socle::testmode::prepare_input(&mut raw);
         // Rejoue les actions de test arrivées à échéance.
         let now_ms = self.started.elapsed().as_millis() as u64;
         while self.script.first().is_some_and(|(t, _)| *t <= now_ms) {
@@ -646,6 +644,10 @@ fn wait_process(pid: u32, ms: u32) {
 fn main() {
     let _ = T0.set(Instant::now());
     socle::crash::install(APP, env!("CARGO_PKG_VERSION"));
+    if discret() && !socle::testmode::enabled() {
+        // Mode discret : le socle passe aussi en mode test (même chose pour les instances relancées).
+        unsafe { std::env::set_var("SOCLE_TEST", "1") };
+    }
     trace(&format!("main pid {}", std::process::id()));
     update::cleanup_old();
     let args: Vec<String> = std::env::args().skip(1).collect();

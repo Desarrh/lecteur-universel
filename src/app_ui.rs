@@ -1355,7 +1355,6 @@ fn draw_pdf(ui: &mut Ui, v: &mut PdfV, p: &Palette, hist: &mut socle::autocomple
                 }
                 let ar = v.sac.field(ui, p, egui::Id::unique("pdf_find"), &mut v.find, "Rechercher dans le PDF", 260.0, hist);
                 let r = ar.response.clone();
-                ui.add_space(26.0); // le cadre du champ déborde à droite de sa zone
                 if v.focus_find {
                     r.request_focus();
                     v.focus_find = false;
@@ -1525,7 +1524,6 @@ fn subs_find_bar(ctx: &egui::Context, m: &mut MedV, p: &Palette, hist: &mut socl
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     let ar = m.sac.field(ui, p, egui::Id::unique("subs_find_field"), &mut m.sfind, "Chercher une phrase dite…", 280.0, hist);
-                    ui.add_space(26.0);
                     if m.sfind_focus {
                         ar.response.request_focus();
                         m.sfind_focus = false;
