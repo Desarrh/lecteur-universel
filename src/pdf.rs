@@ -11,6 +11,8 @@ pub enum Msg {
     Opened { pages: u32, sizes: Vec<(f32, f32)> },
     Page { index: u32, width: u32, img: image::RgbaImage },
     Error(String),
+    /// Demande abandonnée (trop ancienne) : l'app pourra la refaire
+    Dropped { index: u32, width: u32 },
 }
 
 pub struct PdfWorker {
@@ -38,7 +40,25 @@ pub fn open(path: &str, wake: std::sync::Arc<dyn Fn() + Send + Sync>) -> PdfWork
             .collect();
         let _ = tx.send(Msg::Opened { pages, sizes });
         wake();
-        while let Ok((index, width)) = req_rx.recv() {
+        // Au plus les 8 demandes les plus récentes, la plus récente d'abord (défilement rapide :
+        // les pages déjà quittées ne sont pas rendues). Les autres sont rendues à l'app.
+        let mut queue: Vec<(u32, u32)> = Vec::new();
+        loop {
+            if queue.is_empty() {
+                match req_rx.recv() {
+                    Ok(r) => queue.push(r),
+                    Err(_) => break,
+                }
+            }
+            while let Ok(r) = req_rx.try_recv() {
+                queue.push(r);
+            }
+            if queue.len() > 8 {
+                for (index, width) in queue.drain(..queue.len() - 8) {
+                    let _ = tx.send(Msg::Dropped { index, width });
+                }
+            }
+            let Some((index, width)) = queue.pop() else { continue };
             match render(&doc, index, width) {
                 Ok(img) => {
                     let _ = tx.send(Msg::Page { index, width, img });

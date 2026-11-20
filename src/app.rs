@@ -39,6 +39,8 @@ pub struct Settings {
     pub no_auto_update: bool,
     /// Dernière vérification (secondes Unix)
     pub last_update_check: u64,
+    /// Dernier usage (secondes Unix) de chaque position de reprise
+    pub positions_used: HashMap<String, u64>,
     /// Commandes récentes de la palette Ctrl+K (en tête de liste)
     pub palette_recent: Vec<String>,
     /// Recherches récentes (autocomplétion des champs Ctrl+F)
@@ -78,6 +80,8 @@ struct ImgV {
     pending: Option<Receiver<ImgMsg>>,
     /// Vrai quand `img` est en pleine définition (les modifications attendent ce moment)
     full: bool,
+    /// Annule le décodage si l'onglet disparaît
+    _load: crate::moments::CancelOnDrop,
     /// Image d'affichage déjà prête pour la texture (≤ 2560 px, préparée dans le fil),
     /// absente après une modification
     disp: Option<ColorImage>,
@@ -110,7 +114,7 @@ fn display_copy(img: &image::RgbaImage) -> ColorImage {
 
 /// Décode une image dans un fil : aperçu rapide (gros JPEG), puis pleine définition
 /// et copie réduite pour l'écran.
-fn spawn_image_load(path: PathBuf, wake: Arc<dyn Fn() + Send + Sync>) -> Receiver<ImgMsg> {
+fn spawn_image_load(path: PathBuf, wake: Arc<dyn Fn() + Send + Sync>, cancel: socle::Cancel) -> Receiver<ImgMsg> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let ext = kind::ext(&path);
@@ -124,7 +128,7 @@ fn spawn_image_load(path: PathBuf, wake: Arc<dyn Fn() + Send + Sync>) -> Receive
                 }
             }
         }
-        match crate::wic::open_any(&path) {
+        match crate::wic::open_any_with(&path, &cancel) {
             Ok(img) => {
                 let disp = display_copy(&img);
                 let anim = if ext == "gif" { load_gif(&path) } else { Vec::new() };
@@ -146,6 +150,8 @@ struct TxtV {
     wrap: bool,
     lossy: bool,
     truncated: bool,
+    /// Fins de ligne Windows (CR LF) à remettre à l'enregistrement
+    crlf: bool,
     ed: crate::editor::EditState,
 }
 
@@ -168,12 +174,13 @@ struct PdfV {
     focus_find: bool,
     /// Autocomplétion du champ de recherche
     sac: crate::editor::SearchAc,
+    /// Page dont copier le texte dès qu'il est extrait (fil)
+    copy_page: Option<u32>,
 }
 
 struct MedV {
     p: Option<Player>,
     err: Option<String>,
-    tex: Option<TextureHandle>,
     peaks: Option<Vec<f32>>,
     peaks_rx: Option<Receiver<Vec<f32>>>,
     restore: Option<f64>,
@@ -206,6 +213,8 @@ struct MedV {
     moments: Option<Vec<crate::moments::Moment>>,
     moments_rx: Option<Receiver<Vec<crate::moments::Moment>>>,
     moments_job: Option<crate::moments::CancelOnDrop>,
+    /// Annule le calcul de la forme d'onde si l'onglet se ferme
+    _peaks_job: crate::moments::CancelOnDrop,
 }
 
 enum View {
@@ -213,6 +222,8 @@ enum View {
     Text(Box<TxtV>),
     Pdf(Box<PdfV>),
     Docx(Vec<Block>),
+    /// Document Word en cours de lecture (fil)
+    DocxLoading(Receiver<Result<Vec<Block>, String>>),
     Media(Box<MedV>),
     Error(String),
 }
@@ -226,6 +237,8 @@ struct Tab {
     view: View,
     sel: (Option<f64>, Option<f64>),
     confirm_close: bool,
+    /// Fichiers voisins (date du dossier, liste) pour PgPréc / PgSuiv
+    nb: Option<(Option<std::time::SystemTime>, Arc<Vec<PathBuf>>)>,
 }
 
 impl Tab {
@@ -486,6 +499,7 @@ impl App {
             View::Image(v) => format!("{}x{} images={}{}", v.dims().0, v.dims().1, v.frames, if v.full { "" } else { " (chargement)" }),
             View::Text(v) => format!("{} lignes", v.text.lines().count()),
             View::Docx(b) => format!("{} blocs", b.len()),
+            View::DocxLoading(_) => "lecture".into(),
             View::Pdf(v) => match &v.err {
                 Some(e) => return format!("ERREUR {e}"),
                 None => format!("{} pages, {} rendues", v.pages, v.tex.len()),
@@ -610,6 +624,11 @@ impl App {
         }
     }
 
+    /// Un travail (conversion, coupe…) est en cours
+    pub fn busy(&self) -> bool {
+        self.job.is_some()
+    }
+
     pub fn has_tabs(&self) -> bool {
         !self.tabs.is_empty()
     }
@@ -641,13 +660,15 @@ impl App {
         self.s.recents.truncate(12);
     }
 
-    fn load(&mut self, ctx: &egui::Context, path: PathBuf, autoplay: bool) -> Tab {
+    fn load(&mut self, _ctx: &egui::Context, path: PathBuf, autoplay: bool) -> Tab {
         self.remember(&path);
         let k = kind::of(&path);
         self.video_used |= k == Kind::Video;
         let meta = std::fs::metadata(&path).ok();
         let ps = path.to_string_lossy().to_string();
         let restore = self.s.positions.get(&ps).copied();
+        // décodage d'image annulé si l'onglet est fermé ou remplacé (fichier voisin)
+        let img_cancel = socle::Cancel::new();
         let view = match k {
             // Rien n'est décodé ici : l'onglet apparaît tout de suite, l'image arrive du fil.
             Kind::Image => View::Image(Box::new(ImgV {
@@ -664,16 +685,23 @@ impl App {
                 anim: Vec::new(),
                 anim_tex: Vec::new(),
                 anim_t0: Instant::now(),
-                pending: Some(spawn_image_load(path.clone(), self.wake.clone())),
+                pending: Some(spawn_image_load(path.clone(), self.wake.clone(), img_cancel.clone())),
+                _load: crate::moments::CancelOnDrop(img_cancel),
                 full: false,
                 disp: None,
             })),
             Kind::Text | Kind::Unknown => {
                 const MAX: usize = 8 << 20;
-                match std::fs::read(&path) {
+                let read = std::fs::File::open(&path).and_then(|f| {
+                    use std::io::Read;
+                    let mut b = Vec::new();
+                    f.take(MAX as u64 + 1).read_to_end(&mut b).map(|_| b)
+                });
+                match read {
                     Ok(mut b) => {
                         let truncated = b.len() > MAX;
                         b.truncate(MAX);
+                        let crlf = b.windows(2).any(|w| w == b"\r\n");
                         let (text, lossy) = match String::from_utf8(b) {
                             Ok(s) => (s, false),
                             Err(e) => (String::from_utf8_lossy(e.as_bytes()).into_owned(), true),
@@ -682,7 +710,7 @@ impl App {
                             View::Error("Fichier binaire : pas d'aperçu possible.".into())
                         } else {
                             let text = text.replace("\r\n", "\n");
-                            View::Text(Box::new(TxtV { saved: text.clone(), text, lang: kind::ext(&path), wrap: false, lossy, truncated, ed: Default::default() }))
+                            View::Text(Box::new(TxtV { saved: text.clone(), text, lang: kind::ext(&path), wrap: false, lossy, truncated, crlf, ed: Default::default() }))
                         }
                     }
                     Err(e) => View::Error(e.to_string()),
@@ -708,12 +736,19 @@ impl App {
                     find_hit: 0,
                     focus_find: false,
                     sac: Default::default(),
+                    copy_page: None,
                 }))
             }
-            Kind::Docx => match docx::parse(&ps) {
-                Ok(b) => View::Docx(b),
-                Err(e) => View::Error(format!("Document illisible : {e}")),
-            },
+            // Word : lu dans un fil (un gros document ne bloque pas l'ouverture de l'onglet)
+            Kind::Docx => {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let (ps2, wake) = (ps.clone(), self.wake.clone());
+                std::thread::spawn(move || {
+                    let _ = tx.send(docx::parse(&ps2));
+                    wake();
+                });
+                View::DocxLoading(rx)
+            }
             Kind::Audio | Kind::Video => {
                 let audio = k == Kind::Audio;
                 let vw = if audio { None } else { self.parent_hwnd.and_then(crate::vidwin::VideoWindow::new) };
@@ -728,14 +763,16 @@ impl App {
                     }
                     Err(e) => (None, Some(e.message().to_string())),
                 };
+                // Forme d'onde lue en flux (mémoire indépendante de la durée), annulée à la fermeture
+                let peaks_cancel = socle::Cancel::new();
                 let peaks_rx = if audio {
                     let (tx, rx) = std::sync::mpsc::channel();
                     let wake = self.wake.clone();
-                    let ps2 = ps.clone();
+                    let (ps2, c) = (ps.clone(), peaks_cancel.clone());
                     std::thread::spawn(move || {
                         crate::media::init_thread();
-                        if let Ok(pcm) = crate::media::decode_pcm(&ps2, None, &|_| {}) {
-                            let _ = tx.send(crate::media::peaks(&pcm, 1200));
+                        if let Ok(pk) = crate::media::peaks_stream(&ps2, 1200, &c) {
+                            let _ = tx.send(pk);
                             wake();
                         }
                     });
@@ -746,7 +783,6 @@ impl App {
                 View::Media(Box::new(MedV {
                     p,
                     err,
-                    tex: None,
                     peaks: None,
                     peaks_rx,
                     restore: restore.filter(|t| *t > 3.0),
@@ -772,10 +808,10 @@ impl App {
                     moments: None,
                     moments_rx: None,
                     moments_job: None,
+                    _peaks_job: crate::moments::CancelOnDrop(peaks_cancel),
                 }))
             }
         };
-        let _ = ctx;
         let id = self.next_id;
         self.next_id += 1;
         Tab {
@@ -787,6 +823,7 @@ impl App {
             view,
             sel: (None, None),
             confirm_close: false,
+            nb: None,
         }
     }
 
@@ -803,15 +840,17 @@ impl App {
         };
         if let Some(v) = v {
             if v > 0.5 {
+                self.s.positions_used.insert(key.clone(), now_secs());
                 self.s.positions.insert(key, v);
             } else {
+                self.s.positions_used.remove(&key);
                 self.s.positions.remove(&key);
             }
-            if self.s.positions.len() > 300 {
-                let k = self.s.positions.keys().next().cloned();
-                if let Some(k) = k {
-                    self.s.positions.remove(&k);
-                }
+            // au plus 300 : on retire la position utilisée le moins récemment
+            while self.s.positions.len() > 300 {
+                let Some(k) = self.s.positions.keys().min_by_key(|k| self.s.positions_used.get(*k).copied().unwrap_or(0)).cloned() else { break };
+                self.s.positions.remove(&k);
+                self.s.positions_used.remove(&k);
             }
         }
     }
@@ -846,7 +885,8 @@ impl App {
             self.say("Enregistrez d'abord vos modifications.", true);
             return;
         }
-        let list = kind::neighbours(&t.path);
+        let list = self.neighbours(self.active);
+        let Some(t) = self.tabs.get(self.active) else { return };
         let Some(pos) = list.iter().position(|p| *p == t.path) else { return };
         let n = (pos as i32 + dir).rem_euclid(list.len() as i32) as usize;
         let next = list[n].clone();
@@ -854,6 +894,20 @@ impl App {
         let tab = self.load(ctx, next, true);
         self.tabs[self.active] = tab;
         self.target = None;
+    }
+
+    /// Fichiers voisins de l'onglet `i`, gardés en mémoire tant que la date du dossier ne change pas.
+    pub(crate) fn neighbours(&mut self, i: usize) -> Arc<Vec<PathBuf>> {
+        let Some(t) = self.tabs.get_mut(i) else { return Arc::default() };
+        let stamp = t.path.parent().and_then(|d| std::fs::metadata(d).ok()).and_then(|m| m.modified().ok());
+        if let Some((s, l)) = &t.nb {
+            if *s == stamp {
+                return l.clone();
+            }
+        }
+        let l = Arc::new(kind::neighbours(&t.path));
+        t.nb = Some((stamp, l.clone()));
+        l
     }
 
     fn set_theme(&mut self, ctx: &egui::Context, dark: bool) {
@@ -894,6 +948,8 @@ impl App {
                     match r {
                         Ok(paths) => {
                             if let Some(exe) = paths.first() {
+                                // l'aperçu en veille (ancienne version) quitte aussi
+                                let _ = std::process::Command::new(exe).arg("--quitter-apercu").spawn();
                                 crate::update::relaunch(exe);
                             }
                             self.want_exit = true;
@@ -924,8 +980,6 @@ impl App {
         let mut new_frames = 0u64;
         let active = self.active;
         let preview_only = self.preview_only;
-        let max_w = (self.view_w * ctx.pixels_per_point()) as u32;
-        let max_h = (self.view_h * ctx.pixels_per_point()) as u32;
         for (i, t) in self.tabs.iter_mut().enumerate() {
             match &mut t.view {
                 View::Media(m) => {
@@ -999,7 +1053,6 @@ impl App {
                             new_frames += 1;
                         }
                     }
-                    let _ = (max_w, max_h);
                     if p.playing() {
                         // Affichage direct : la vidéo s'affiche seule, l'interface (temps, frise) peut aller moins vite.
                         let ms = if p.hw_render { 40 } else if p.has_video { 12 } else { 120 };
@@ -1038,6 +1091,15 @@ impl App {
                         t.view = View::Error(format!("Image illisible : {e}"));
                     }
                 }
+                View::DocxLoading(rx) => {
+                    let got = rx.try_recv().ok();
+                    if let Some(r) = got {
+                        t.view = match r {
+                            Ok(b) => View::Docx(b),
+                            Err(e) => View::Error(format!("Document illisible : {e}")),
+                        };
+                    }
+                }
                 View::Pdf(v) => {
                     if let Some(rx) = &v.texts_rx {
                         if let Ok(r) = rx.try_recv() {
@@ -1051,7 +1113,17 @@ impl App {
                             }
                         }
                     }
-                    if (v.find_open || std::env::var("LECTEUR_PDF_TEXTE").is_ok()) && v.texts.is_none() && v.texts_rx.is_none() {
+                    if let (Some(pg), Some(t)) = (v.copy_page, v.texts.as_ref()) {
+                        let txt = t.get(pg as usize).cloned().unwrap_or_default();
+                        v.copy_page = None;
+                        if txt.trim().is_empty() {
+                            self.toasts.error("Pas de texte sur cette page (PDF scanné ?)");
+                        } else {
+                            ctx.copy_text(txt);
+                            self.toasts.ok("Texte de la page copié");
+                        }
+                    }
+                    if (v.find_open || v.copy_page.is_some() || std::env::var("LECTEUR_PDF_TEXTE").is_ok()) && v.texts.is_none() && v.texts_rx.is_none() {
                         let (tx, rx) = std::sync::mpsc::channel();
                         let (ps, wake) = (t.path.to_string_lossy().to_string(), self.wake.clone());
                         std::thread::spawn(move || {
@@ -1075,6 +1147,9 @@ impl App {
                                 }
                             }
                             pdf::Msg::Error(e) => v.err = Some(e),
+                            pdf::Msg::Dropped { index, width } => {
+                                v.pending.remove(&(index, width));
+                            }
                         }
                     }
                     // Libère la mémoire des pages loin de la page courante
@@ -1318,7 +1393,11 @@ impl App {
                 p2.store(x.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
                 wake();
             };
-            let r = f(&pr);
+            // Un panic (décodeur, encodeur…) devient une erreur affichée, pas un travail bloqué.
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&pr))).unwrap_or_else(|e| {
+                let m = e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default();
+                Err(format!("erreur interne {m}").trim().to_string())
+            });
             if let Ok(mut d) = d2.lock() {
                 *d = Some(r);
             }
@@ -1386,21 +1465,29 @@ impl App {
         let path = t.path.clone();
         let Some(pl) = t.player() else { return };
         let at = pl.time();
-        // Affichage direct : l'image est redécodée depuis le fichier, en pleine définition.
-        let img = if pl.hw_render {
-            crate::media::video_frames(&path.to_string_lossy(), at, at + 0.25, 8.0, 0, &|_| {})
-                .ok()
-                .and_then(|mut v| if v.is_empty() { None } else { Some(v.remove(0)) })
-                .map(|i| ColorImage::from_rgba_unmultiplied([i.width() as usize, i.height() as usize], i.as_raw()))
-        } else {
-            pl.capture()
-        };
+        let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let stem = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+        // Affichage direct : l'image est redécodée depuis le fichier, en pleine définition, dans un
+        // travail de fond (environ 100 ms : l'interface ne se fige pas).
+        if pl.hw_render {
+            let out = kind::free_path(&dir, &format!("{stem} {}", hms(at).replace(':', "m")), "png");
+            self.start_job("Capture".into(), move |_| {
+                let img = crate::media::video_frames(&path.to_string_lossy(), at, at + 0.25, 8.0, 0, &|_| {})
+                    .map_err(|e| e.message().to_string())?
+                    .into_iter()
+                    .next()
+                    .ok_or("aucune image à cet instant")?;
+                img.save(&out).map_err(|e| e.to_string())?;
+                arboard_copy(img.as_raw(), img.width(), img.height());
+                Ok(vec![out])
+            });
+            return;
+        }
+        let img = pl.capture();
         let Some(img) = img else {
             self.say("Capture impossible pour l'instant.", true);
             return;
         };
-        let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
-        let stem = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
         let out = kind::free_path(&dir, &format!("{stem} {}", hms(at).replace(':', "m")), "png");
         let rgba: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
         let (w, h) = (img.size[0] as u32, img.size[1] as u32);
@@ -1521,7 +1608,8 @@ impl App {
         };
         let old = std::mem::replace(&mut v.img, new);
         v.undo.push((old, what.to_string()));
-        if v.undo.len() > 8 {
+        // au plus 8 étapes et ~512 Mo d'images gardées pour Annuler (une photo 24 Mpx = 96 Mo)
+        while v.undo.len() > 8 || (v.undo.len() > 1 && v.undo.iter().map(|(i, _)| i.as_raw().len()).sum::<usize>() > 512 << 20) {
             v.undo.remove(0);
         }
         v.history.push(what.to_string());
@@ -1536,12 +1624,21 @@ impl App {
         let stem = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
         let ext = kind::ext(&path);
         let target = if replace { path.clone() } else { kind::free_path(&dir, &format!("{stem} (modifié)"), &ext) };
+        // Rien à enregistrer (texte inchangé ou tronqué, image non modifiée) : pas de sauvegarde inutile
+        let changed = match &t.view {
+            View::Text(v) => !v.truncated && v.text != v.saved,
+            View::Image(v) => !v.history.is_empty(),
+            _ => false,
+        };
+        if !changed {
+            return;
+        }
         if replace {
-            // Sauvegarde de l'original dans %LOCALAPPDATA% (durable, contrairement à %TEMP%)
-            {
-                let bak = socle::paths::cache_dir(crate::APP).join("sauvegardes");
-                let _ = std::fs::create_dir_all(&bak);
-                let _ = std::fs::copy(&path, bak.join(format!("{}-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0), path.file_name().unwrap_or_default().to_string_lossy())));
+            // L'original est copié dans Documents\Lecteur universel\Sauvegardes avant d'être
+            // remplacé ; si la copie échoue, on ne remplace rien.
+            if let Err(e) = backup_original(&path) {
+                self.toasts.error(format!("Sauvegarde impossible, l'original n'est pas remplacé : {e}"));
+                return;
             }
         }
         let res: Result<(), String> = match &mut t.view {
@@ -1549,9 +1646,8 @@ impl App {
                 if v.truncated || v.text == v.saved {
                     return;
                 }
-                let crlf = std::fs::read(&path).map(|b| b.windows(2).any(|w| w == b"\r\n")).unwrap_or(false);
-                let out = if crlf { v.text.replace('\n', "\r\n") } else { v.text.clone() };
-                let r = std::fs::write(&target, out).map_err(|e| e.to_string());
+                let out = if v.crlf { v.text.replace('\n', "\r\n") } else { v.text.clone() };
+                let r = socle::paths::write_atomic(&target, out.as_bytes());
                 if r.is_ok() && replace {
                     v.saved = v.text.clone();
                 }
@@ -1570,7 +1666,11 @@ impl App {
                     "gif" => Target::Gif,
                     _ => Target::Png,
                 };
-                let r = convert::save_raster(&v.img, &target, tg, &self.opts);
+                let tmp = target.with_extension(format!("{ext}.lecteur-tmp"));
+                let r = convert::save_raster(&v.img, &tmp, tg, &self.opts).and_then(|_| std::fs::rename(&tmp, &target).map_err(|e| e.to_string()));
+                if r.is_err() {
+                    let _ = std::fs::remove_file(&tmp);
+                }
                 if r.is_ok() && replace {
                     v.history.clear();
                     v.undo.clear();
@@ -1591,6 +1691,41 @@ impl App {
             Err(e) => self.say(format!("Échec de l'enregistrement : {e}"), true),
         }
     }
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// Dossier des sauvegardes, visible par l'utilisateur : Documents\Lecteur universel\Sauvegardes.
+pub fn backup_dir() -> PathBuf {
+    let docs = unsafe {
+        use windows::Win32::UI::Shell::{FOLDERID_Documents, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
+        SHGetKnownFolderPath(&FOLDERID_Documents, KF_FLAG_DEFAULT, None).ok().map(|p| {
+            let s = p.to_string().unwrap_or_default();
+            windows::Win32::System::Com::CoTaskMemFree(Some(p.0 as _));
+            PathBuf::from(s)
+        })
+    };
+    docs.filter(|d| !d.as_os_str().is_empty()).unwrap_or_else(|| socle::paths::config_dir(crate::APP)).join("Lecteur universel").join("Sauvegardes")
+}
+
+/// Copie `path` dans le dossier des sauvegardes (horodatée) et purge celles de plus de 30 jours.
+fn backup_original(path: &Path) -> Result<(), String> {
+    let dir = backup_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let name = format!("{}-{}", now_secs(), path.file_name().unwrap_or_default().to_string_lossy());
+    std::fs::copy(path, dir.join(name)).map_err(|e| e.to_string())?;
+    let limit = std::time::Duration::from_secs(30 * 24 * 3600);
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.flatten() {
+            let old = e.metadata().ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok()).is_some_and(|age| age > limit);
+            if old {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1647,6 +1782,7 @@ fn arboard_copy(rgba: &[u8], w: u32, h: u32) -> bool {
 // ---------------------------------------------------------------------------
 // Auto-test des actions d'édition (lecteur-universel --selftest <dossier>)
 
+#[cfg(feature = "dev")]
 impl App {
     fn wait_job(&mut self) -> Result<Vec<PathBuf>, String> {
         for _ in 0..1200 {
@@ -1755,6 +1891,36 @@ impl App {
         let cues = crate::subs::parse("1\n00:00:01,000 --> 00:00:02,000\nBonjour\n\n2\n00:00:05,500 --> 00:00:07,000\nOn a gagné la partie !\n");
         let hits = crate::subs::find(&cues, "GAGNE la");
         res.push(("Phrase dans les sous-titres (L1)".into(), hits == vec![5.5], format!("{hits:?}")));
+        // 11. Sous-titres : BOM, virgule ou point, réglages VTT après l'horodatage
+        let vtt = crate::subs::parse("\u{feff}WEBVTT\n\n00:00:01.500 --> 00:00:03.000 align:start position:10%\nUn\n\n00:00:04,000 --> 00:00:05,250\nDeux\n");
+        let ok = vtt.len() == 2 && (vtt[0].start - 1.5).abs() < 1e-6 && (vtt[1].end - 5.25).abs() < 1e-6 && vtt[0].text == "Un";
+        res.push(("Sous-titres BOM / VTT / virgule".into(), ok, format!("{} répliques", vtt.len())));
+        // 12. Word piégé : 100 Mo de texte qui se compressent en quelques Ko → refusé
+        let bomb = dir.join("bombe.docx");
+        let made = (|| -> Result<(), String> {
+            use std::io::Write;
+            let f = std::fs::File::create(&bomb).map_err(|e| e.to_string())?;
+            let mut z = zip::ZipWriter::new(f);
+            z.start_file("word/document.xml", zip::write::SimpleFileOptions::default()).map_err(|e| e.to_string())?;
+            let chunk = vec![b' '; 1 << 20];
+            for _ in 0..100 {
+                z.write_all(&chunk).map_err(|e| e.to_string())?;
+            }
+            z.finish().map_err(|e| e.to_string())?;
+            Ok(())
+        })();
+        let r = crate::docx::parse(&bomb.to_string_lossy());
+        let _ = std::fs::remove_file(&bomb);
+        res.push(("Word de 100 Mo refusé".into(), made.is_ok() && r.is_err(), format!("{:?}", r.err())));
+        // 13. PDF maison : parenthèses et antislash relus par lopdf
+        let pdfp = dir.join("echappement.pdf");
+        let w = crate::pdfgen::text_to_pdf("a (b) \\ c", &pdfp);
+        let back = crate::pdf::page_texts(&pdfp.to_string_lossy()).ok().and_then(|t| t.into_iter().next()).unwrap_or_default();
+        let _ = std::fs::remove_file(&pdfp);
+        res.push(("PDF : ( ) \\ relus".into(), w.is_ok() && back.contains("a (b) \\ c"), back.trim().to_string()));
+        // 14. Un PDF ne se convertit ni en ICO ni en GIF
+        let tg = crate::convert::targets(Kind::Pdf, "pdf");
+        res.push(("PDF sans ICO ni GIF".into(), !tg.contains(&Target::Ico) && !tg.contains(&Target::Gif), format!("{} formats", tg.len())));
         res
     }
 }

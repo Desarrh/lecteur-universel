@@ -1,7 +1,9 @@
 //! Images : décodage complet par le socle ; ici, l'aperçu réduit rapide par Windows (WIC)
 //! et l'encodeur HEIC (fichiers de test).
 
-use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+use windows::Win32::Foundation::GENERIC_READ;
+#[cfg(feature = "dev")]
+use windows::Win32::Foundation::GENERIC_WRITE;
 use windows::Win32::Graphics::Imaging::*;
 use windows::Win32::System::Com::*;
 use windows::core::HSTRING;
@@ -9,9 +11,15 @@ use windows::core::HSTRING;
 /// Décode n'importe quelle image lisible par le socle : `image` d'abord, puis PSD, RAW, SVG, EXR,
 /// JXL en Rust, et WIC (HEIC, AVIF, JXR…) en repli, avec un message clair s'il manque une extension.
 pub fn open_any(path: &std::path::Path) -> Result<image::RgbaImage, String> {
-    socle::images::decode(path, &socle::Cancel::new())
+    open_any_with(path, &socle::Cancel::new())
 }
 
+/// Idem, interrompu dès que `cancel` est annulé.
+pub fn open_any_with(path: &std::path::Path, cancel: &socle::Cancel) -> Result<image::RgbaImage, String> {
+    socle::images::decode(path, cancel)
+}
+
+#[cfg(feature = "dev")]
 /// Encode en HEIC avec l'encodeur de Windows (extension HEIF requise) — sert aux fichiers de test.
 pub fn encode_heic(img: &image::RgbaImage, out: &std::path::Path) -> Result<(), String> {
     let r = encode_heic_inner(img, out);
@@ -21,6 +29,7 @@ pub fn encode_heic(img: &image::RgbaImage, out: &std::path::Path) -> Result<(), 
     r.map_err(|e| format!("{e} (l'encodeur HEIF de Windows demande aussi l'extension « Extensions vidéo HEVC »)"))
 }
 
+#[cfg(feature = "dev")]
 fn encode_heic_inner(img: &image::RgbaImage, out: &std::path::Path) -> Result<(), String> {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);

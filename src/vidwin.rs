@@ -5,7 +5,7 @@
 //! découpés de sa région pour rester visibles.
 
 use std::sync::Once;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -109,14 +109,6 @@ impl VideoWindow {
         }
     }
 
-    pub fn size(&self) -> (i32, i32) {
-        self.placed.map(|p| (p.2, p.3)).unwrap_or((0, 0))
-    }
-
-    pub fn client_rect(&self) -> RECT {
-        let (w, h) = self.size();
-        RECT { left: 0, top: 0, right: w, bottom: h }
-    }
 }
 
 impl Drop for VideoWindow {

@@ -237,6 +237,19 @@ pub fn run(src: &Source, t: Target, o: &Opts, progress: &dyn Fn(f32)) -> Result<
             Ok(vec![p])
         }
         Hub::Pcm => {
+            // MP3 en flux quand c'est possible : une vidéo d'une heure ne passe pas par 700 Mo de PCM
+            if t == Target::Mp3 {
+                let p = out(t.ext());
+                let ps = p.to_string_lossy().to_string();
+                match crate::media::write_mp3_stream(&path, src.range, &ps, o.mp3_kbps, progress) {
+                    Ok(true) => {
+                        progress(1.0);
+                        return Ok(vec![p]);
+                    }
+                    Ok(false) => {}
+                    Err(e) => return Err(format!("encodeur MP3 de Windows : {}", e.message())),
+                }
+            }
             let pcm = crate::media::decode_pcm(&path, src.range, &|f| progress(f * 0.5)).map_err(|e| e.message().to_string())?;
             if pcm.samples.is_empty() {
                 return Err("aucune piste audio".into());
@@ -369,6 +382,9 @@ pub fn write_gif(p: &Path, frames: Vec<image::RgbaImage>, fps: f64, progress: &d
 pub fn save_raster(img: &image::RgbaImage, p: &Path, t: Target, o: &Opts) -> Result<(), String> {
     use image::ImageFormat as F;
     let e = |e: image::ImageError| e.to_string();
+    if t == Target::Webp && img.width().max(img.height()) > 16_383 {
+        return Err("WebP : 16 383 px de côté au plus (réduisez l'image d'abord)".into());
+    }
     match t {
         Target::Jpg => {
             let rgb = image::DynamicImage::ImageRgba8(img.clone()).to_rgb8();
@@ -377,7 +393,9 @@ pub fn save_raster(img: &image::RgbaImage, p: &Path, t: Target, o: &Opts) -> Res
             enc.encode_image(&rgb).map_err(e)
         }
         Target::Ico => {
-            let s = image::imageops::resize(img, 256.min(img.width()), 256.min(img.height()), image::imageops::FilterType::Lanczos3);
+            let k = (256.0 / img.width().max(img.height()) as f32).min(1.0);
+            let (w, h) = (((img.width() as f32 * k).round() as u32).max(1), ((img.height() as f32 * k).round() as u32).max(1));
+            let s = image::imageops::resize(img, w, h, image::imageops::FilterType::Lanczos3);
             s.save_with_format(p, F::Ico).map_err(e)
         }
         Target::Bmp => image::DynamicImage::ImageRgba8(img.clone()).to_rgb8().save_with_format(p, F::Bmp).map_err(e),

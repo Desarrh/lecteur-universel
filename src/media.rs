@@ -239,6 +239,7 @@ impl Player {
         !evs.is_empty()
     }
 
+    #[cfg(feature = "dev")]
     /// Durée d'un fichier (s) via le Source Reader, sans lecture.
     pub fn probe_duration(path: &str) -> f64 {
         reader(path, false).map(|r| duration_of(&r)).unwrap_or(0.0)
@@ -323,23 +324,6 @@ impl Player {
             r.ok()?;
             img
         }
-    }
-
-    /// Nouvelle image vidéo (taille limitée à `max_w` pour économiser le CPU).
-    pub fn frame(&mut self, max_w: u32, max_h: u32) -> Option<egui::ColorImage> {
-        if !self.has_video || self.size.0 == 0 {
-            return None;
-        }
-        let pts = unsafe { self.engine.OnVideoStreamTick().ok()? };
-        if pts == self.last_pts {
-            return None;
-        }
-        self.last_pts = pts;
-        let (nw, nh) = self.size;
-        let sc = (max_w.max(64) as f64 / nw as f64).min(max_h.max(64) as f64 / nh as f64).min(1.0);
-        let w = ((nw as f64 * sc) as u32).max(2);
-        let h = ((nh as f64 * sc) as u32).max(2);
-        self.grab(w & !1, h & !1)
     }
 
     /// Image à la taille exacte d'affichage, au format du tampon d'écran
@@ -526,18 +510,8 @@ pub fn duration_of(r: &IMFSourceReader) -> f64 {
 /// Décode la première piste audio en PCM 16 bits. `progress` reçoit 0..1.
 pub fn decode_pcm(path: &str, range: Option<(f64, f64)>, progress: &dyn Fn(f32)) -> Result<Pcm> {
     unsafe {
-        let r = reader(path, false)?;
-        let a = MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32;
-        r.SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS.0 as u32, false)?;
-        r.SetStreamSelection(a, true)?;
-        let mt = MFCreateMediaType()?;
-        mt.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)?;
-        mt.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM)?;
-        mt.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)?;
-        r.SetCurrentMediaType(a, None, &mt)?;
-        let cur = r.GetCurrentMediaType(a)?;
-        let channels = cur.GetUINT32(&MF_MT_AUDIO_NUM_CHANNELS)? as u16;
-        let rate = cur.GetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND)?;
+        let (r, a, channels, rate) = pcm_reader(path)?;
+        let channels = channels as u16;
         let dur = duration_of(&r);
         let (t0, t1) = range.unwrap_or((0.0, f64::MAX));
         if t0 > 0.0 {
@@ -586,6 +560,32 @@ pub fn decode_pcm(path: &str, range: Option<(f64, f64)>, progress: &dyn Fn(f32))
 /// Niveau sonore (dBFS) par tranche de `hop` secondes, lu en flux sans garder le son
 /// (une heure de vidéo = 72 000 valeurs). `cancel` interrompt la lecture.
 pub fn loudness(path: &str, hop: f64, cancel: &socle::Cancel) -> Result<Vec<f32>> {
+    let (r, a, channels, rate) = pcm_reader(path)?;
+    let win = ((rate as f64 * hop) as usize).max(1) * channels as usize;
+    let (mut acc, mut n) = (0f64, 0usize);
+    let mut out = Vec::new();
+    let db = |ms: f64| (10.0 * ms.max(1e-9).log10()) as f32;
+    pcm_stream(&r, a, cancel, &mut |sl, _| {
+        for &x in sl {
+            let v = x as f64 / 32768.0;
+            acc += v * v;
+            n += 1;
+            if n == win {
+                out.push(db(acc / n as f64));
+                acc = 0.0;
+                n = 0;
+            }
+        }
+        true
+    })?;
+    if n > 0 {
+        out.push(db(acc / n as f64));
+    }
+    Ok(out)
+}
+
+/// Lecteur de la première piste audio en PCM 16 bits : (lecteur, piste, canaux, fréquence).
+pub(crate) fn pcm_reader(path: &str) -> Result<(IMFSourceReader, u32, u32, u32)> {
     unsafe {
         let r = reader(path, false)?;
         let a = MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32;
@@ -597,21 +597,26 @@ pub fn loudness(path: &str, hop: f64, cancel: &socle::Cancel) -> Result<Vec<f32>
         mt.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)?;
         r.SetCurrentMediaType(a, None, &mt)?;
         let cur = r.GetCurrentMediaType(a)?;
-        let channels = cur.GetUINT32(&MF_MT_AUDIO_NUM_CHANNELS)?.max(1) as usize;
-        let rate = cur.GetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND)?.max(1) as f64;
-        let win = ((rate * hop) as usize).max(1) * channels;
-        let (mut acc, mut n) = (0f64, 0usize);
-        let mut out = Vec::new();
-        let db = |ms: f64| (10.0 * ms.max(1e-9).log10()) as f32;
+        let channels = cur.GetUINT32(&MF_MT_AUDIO_NUM_CHANNELS)?.max(1);
+        let rate = cur.GetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND)?.max(1);
+        Ok((r, a, channels, rate))
+    }
+}
+
+/// Lit le son en flux, échantillon par échantillon (bloc PCM, instant du bloc en s), sans le
+/// garder en mémoire. S'arrête si `f` renvoie faux ou si `cancel` est annulé.
+pub(crate) fn pcm_stream(r: &IMFSourceReader, a: u32, cancel: &socle::Cancel, f: &mut dyn FnMut(&[i16], f64) -> bool) -> Result<()> {
+    unsafe {
         loop {
             if cancel.is_cancelled() {
                 return Err(Error::from(windows::Win32::Foundation::E_ABORT));
             }
             let mut flags = 0u32;
+            let mut ts = 0i64;
             let mut sample = None;
-            r.ReadSample(a, 0, None, Some(&mut flags), None, Some(&mut sample))?;
+            r.ReadSample(a, 0, None, Some(&mut flags), Some(&mut ts), Some(&mut sample))?;
             if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
-                break;
+                return Ok(());
             }
             let Some(s) = sample else { continue };
             let buf = s.ConvertToContiguousBuffer()?;
@@ -619,43 +624,126 @@ pub fn loudness(path: &str, hop: f64, cancel: &socle::Cancel) -> Result<Vec<f32>
             let mut len = 0u32;
             buf.Lock(&mut p, None, Some(&mut len))?;
             let sl = std::slice::from_raw_parts(p as *const i16, len as usize / 2);
-            for &x in sl {
-                let v = x as f64 / 32768.0;
-                acc += v * v;
-                n += 1;
-                if n == win {
-                    out.push(db(acc / n as f64));
-                    acc = 0.0;
-                    n = 0;
-                }
-            }
+            let go = f(sl, ts as f64 / 1e7);
             buf.Unlock()?;
+            if !go {
+                return Ok(());
+            }
         }
-        if n > 0 {
-            out.push(db(acc / n as f64));
-        }
-        Ok(out)
     }
 }
 
-/// Crêtes pour la forme d'onde (une valeur 0..1 par tranche).
-pub fn peaks(p: &Pcm, buckets: usize) -> Vec<f32> {
-    let frames = p.samples.len() / p.channels.max(1) as usize;
-    if frames == 0 {
-        return vec![0.0; buckets];
-    }
-    let per = (frames / buckets).max(1);
-    let ch = p.channels.max(1) as usize;
-    (0..buckets)
-        .map(|b| {
-            let s = b * per * ch;
-            let e = ((b + 1) * per * ch).min(p.samples.len());
-            if s >= e {
-                return 0.0;
+/// Forme d'onde (une crête 0..1 par tranche) lue en flux : la mémoire ne dépend pas de la durée.
+pub fn peaks_stream(path: &str, buckets: usize, cancel: &socle::Cancel) -> Result<Vec<f32>> {
+    let (r, a, channels, rate) = pcm_reader(path)?;
+    let dur = duration_of(&r).max(0.001);
+    let mut out = vec![0f32; buckets.max(1)];
+    let ch = channels as usize;
+    pcm_stream(&r, a, cancel, &mut |sl, t0| {
+        for (k, f) in sl.chunks(ch).enumerate() {
+            let t = t0 + k as f64 / rate as f64;
+            let n = out.len();
+            let b = (((t / dur) * n as f64) as usize).min(n - 1);
+            if let Some(slot) = out.get_mut(b) {
+                let v = f.iter().map(|x| x.unsigned_abs()).max().unwrap_or(0) as f32 / 32768.0;
+                if v > *slot {
+                    *slot = v;
+                }
             }
-            p.samples[s..e].iter().map(|v| v.unsigned_abs()).max().unwrap_or(0) as f32 / 32768.0
-        })
-        .collect()
+        }
+        true
+    })?;
+    Ok(out)
+}
+
+/// Son → MP3 en flux (sans tout décoder en mémoire) quand le format s'y prête (32, 44,1 ou
+/// 48 kHz, 1 ou 2 canaux) ; `Ok(false)` sinon (l'appelant passe par le décodage complet).
+pub fn write_mp3_stream(path: &str, range: Option<(f64, f64)>, out: &str, kbps: u32, progress: &dyn Fn(f32)) -> Result<bool> {
+    let (r, a, channels, rate) = pcm_reader(path)?;
+    if ![32000, 44100, 48000].contains(&rate) || channels > 2 {
+        return Ok(false);
+    }
+    let dur = duration_of(&r);
+    let (t0, t1) = range.unwrap_or((0.0, f64::MAX));
+    unsafe {
+        if t0 > 0.0 {
+            r.SetCurrentPosition(&GUID::zeroed(), &pv_i64((t0 * 1e7) as i64))?;
+        }
+    }
+    let (w, idx) = mp3_writer(out, rate, channels, kbps)?;
+    let ch = channels as usize;
+    let mut t: i64 = 0;
+    let mut err = None;
+    let res = pcm_stream(&r, a, &socle::Cancel::new(), &mut |sl, ts| {
+        let frames = sl.len() / ch;
+        let end_ts = ts + frames as f64 / rate as f64;
+        if ts >= t1 {
+            return false;
+        }
+        // coupe précise au début et à la fin de la plage
+        let skip = if ts < t0 { (((t0 - ts) * rate as f64) as usize).min(frames) } else { 0 };
+        let keep = if end_ts > t1 { (((t1 - ts) * rate as f64) as usize).min(frames) } else { frames };
+        if keep > skip {
+            if let Err(e) = mp3_chunk(&w, idx, &sl[skip * ch..keep * ch], ch, rate, &mut t) {
+                err = Some(e);
+                return false;
+            }
+        }
+        if dur > 0.0 {
+            progress(((ts - t0.min(ts)) / (dur.min(t1) - t0).max(0.001)) as f32);
+        }
+        end_ts < t1
+    });
+    if let Some(e) = err {
+        let _ = std::fs::remove_file(out);
+        return Err(e);
+    }
+    res.and_then(|_| unsafe { w.Finalize() }).map(|_| true).inspect_err(|_| {
+        let _ = std::fs::remove_file(out);
+    })
+}
+
+fn mp3_writer(out: &str, rate: u32, channels: u32, kbps: u32) -> Result<(IMFSinkWriter, u32)> {
+    unsafe {
+        let w = MFCreateSinkWriterFromURL(&HSTRING::from(out), None, None)?;
+        let ot = MFCreateMediaType()?;
+        ot.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)?;
+        ot.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_MP3)?;
+        ot.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, rate)?;
+        ot.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, channels)?;
+        ot.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, kbps * 1000 / 8)?;
+        let idx = w.AddStream(&ot)?;
+        let it = MFCreateMediaType()?;
+        it.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)?;
+        it.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM)?;
+        it.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)?;
+        it.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, rate)?;
+        it.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, channels)?;
+        it.SetUINT32(&MF_MT_AUDIO_BLOCK_ALIGNMENT, channels * 2)?;
+        it.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, rate * channels * 2)?;
+        w.SetInputMediaType(idx, &it, None)?;
+        w.BeginWriting()?;
+        Ok((w, idx))
+    }
+}
+
+fn mp3_chunk(w: &IMFSinkWriter, idx: u32, part: &[i16], ch: usize, rate: u32, t: &mut i64) -> Result<()> {
+    unsafe {
+        let bytes = part.len() * 2;
+        let buf = MFCreateMemoryBuffer(bytes as u32)?;
+        let mut ptr = std::ptr::null_mut();
+        buf.Lock(&mut ptr, None, None)?;
+        std::ptr::copy_nonoverlapping(part.as_ptr() as *const u8, ptr, bytes);
+        buf.Unlock()?;
+        buf.SetCurrentLength(bytes as u32)?;
+        let s = MFCreateSample()?;
+        s.AddBuffer(&buf)?;
+        let d = (part.len() / ch) as i64 * 10_000_000 / rate as i64;
+        s.SetSampleTime(*t)?;
+        s.SetSampleDuration(d)?;
+        *t += d;
+        w.WriteSample(idx, &s)
+    }
 }
 
 pub fn write_wav(p: &Pcm, out: &str) -> std::result::Result<(), String> {
@@ -715,49 +803,16 @@ pub fn write_mp3(p: &Pcm, out: &str, kbps: u32, progress: &dyn Fn(f32)) -> Resul
 }
 
 fn write_mp3_inner(p: &Pcm, out: &str, kbps: u32, progress: &dyn Fn(f32)) -> Result<()> {
-    unsafe {
-        let w = MFCreateSinkWriterFromURL(&HSTRING::from(out), None, None)?;
-        let ot = MFCreateMediaType()?;
-        ot.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)?;
-        ot.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_MP3)?;
-        ot.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, p.rate)?;
-        ot.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, p.channels as u32)?;
-        ot.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, kbps * 1000 / 8)?;
-        let idx = w.AddStream(&ot)?;
-        let it = MFCreateMediaType()?;
-        it.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)?;
-        it.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM)?;
-        it.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)?;
-        it.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, p.rate)?;
-        it.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, p.channels as u32)?;
-        it.SetUINT32(&MF_MT_AUDIO_BLOCK_ALIGNMENT, p.channels as u32 * 2)?;
-        it.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, p.rate * p.channels as u32 * 2)?;
-        w.SetInputMediaType(idx, &it, None)?;
-        w.BeginWriting()?;
-        let ch = p.channels as usize;
-        let chunk = p.rate as usize * ch; // 1 s
-        let mut t: i64 = 0;
-        let total = p.samples.len().max(1);
-        for (i, part) in p.samples.chunks(chunk).enumerate() {
-            let bytes = part.len() * 2;
-            let buf = MFCreateMemoryBuffer(bytes as u32)?;
-            let mut ptr = std::ptr::null_mut();
-            buf.Lock(&mut ptr, None, None)?;
-            std::ptr::copy_nonoverlapping(part.as_ptr() as *const u8, ptr, bytes);
-            buf.Unlock()?;
-            buf.SetCurrentLength(bytes as u32)?;
-            let s = MFCreateSample()?;
-            s.AddBuffer(&buf)?;
-            let d = (part.len() / ch) as i64 * 10_000_000 / p.rate as i64;
-            s.SetSampleTime(t)?;
-            s.SetSampleDuration(d)?;
-            t += d;
-            w.WriteSample(idx, &s)?;
-            progress((i * chunk) as f32 / total as f32);
-        }
-        w.Finalize()?;
-        Ok(())
+    let (w, idx) = mp3_writer(out, p.rate, p.channels as u32, kbps)?;
+    let ch = p.channels as usize;
+    let chunk = p.rate as usize * ch; // 1 s
+    let mut t: i64 = 0;
+    let total = p.samples.len().max(1);
+    for (i, part) in p.samples.chunks(chunk).enumerate() {
+        mp3_chunk(&w, idx, part, ch, p.rate, &mut t)?;
+        progress((i * chunk) as f32 / total as f32);
     }
+    unsafe { w.Finalize() }
 }
 
 /// Images RGBA d'une vidéo entre t0 et t1, à `fps`, largeur `width`.

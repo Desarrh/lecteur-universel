@@ -23,13 +23,19 @@ pub enum Block {
 pub fn parse(path: &str) -> Result<Vec<Block>, String> {
     let f = std::fs::File::open(path).map_err(|e| e.to_string())?;
     let mut z = zip::ZipArchive::new(f).map_err(|e| format!("pas un .docx valide : {e}"))?;
+    // Lectures bornées : une « bombe zip » (quelques Ko qui se décompressent en Go) est refusée.
+    const MAX_XML: u64 = 64 << 20;
+    const MAX_IMG: u64 = 50 << 20;
     let mut xml = String::new();
-    z.by_name("word/document.xml").map_err(|e| e.to_string())?.read_to_string(&mut xml).map_err(|e| e.to_string())?;
+    z.by_name("word/document.xml").map_err(|e| e.to_string())?.take(MAX_XML + 1).read_to_string(&mut xml).map_err(|e| e.to_string())?;
+    if xml.len() as u64 > MAX_XML {
+        return Err("Document trop gros (plus de 64 Mo de texte).".into());
+    }
     // Relations : identifiant (rId…) → fichier image (media/image1.png)
     let mut rels = std::collections::HashMap::new();
     let mut rx = String::new();
-    if let Ok(mut f) = z.by_name("word/_rels/document.xml.rels") {
-        let _ = f.read_to_string(&mut rx);
+    if let Ok(f) = z.by_name("word/_rels/document.xml.rels") {
+        let _ = f.take(8 << 20).read_to_string(&mut rx);
     }
     let mut rr = Reader::from_str(&rx);
     while let Ok(ev) = rr.read_event() {
@@ -50,13 +56,13 @@ pub fn parse(path: &str) -> Result<Vec<Block>, String> {
         }
     }
     let mut images: Vec<std::sync::Arc<Vec<u8>>> = Vec::new();
-    let mut load_img = |z: &mut zip::ZipArchive<std::fs::File>, rid: &str| -> Option<std::sync::Arc<Vec<u8>>> {
+    let load_img = |z: &mut zip::ZipArchive<std::fs::File>, rid: &str| -> Option<std::sync::Arc<Vec<u8>>> {
         let t = rels.get(rid)?;
         let path = if let Some(s) = t.strip_prefix('/') { s.to_string() } else { format!("word/{t}") };
-        let mut f = z.by_name(&path).ok()?;
+        let f = z.by_name(&path).ok()?;
         let mut b = Vec::new();
-        f.read_to_end(&mut b).ok()?;
-        Some(std::sync::Arc::new(b))
+        f.take(MAX_IMG + 1).read_to_end(&mut b).ok()?;
+        (b.len() as u64 <= MAX_IMG).then(|| std::sync::Arc::new(b))
     };
     let mut r = Reader::from_str(&xml);
     let mut out = Vec::new();

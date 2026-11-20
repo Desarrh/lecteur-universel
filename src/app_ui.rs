@@ -4,8 +4,7 @@
 
 use super::*;
 use crate::icons::{self, Icon, Look};
-use egui::text::TextWrapping;
-use egui::{Galley, Popup, UiBuilder};
+use egui::{Popup, UiBuilder};
 
 const LIGHT: Color32 = Color32::from_rgb(0xF5, 0xED, 0xDC);
 const BAR: Color32 = Color32::from_rgb(0x0F, 0x1B, 0x2D);
@@ -21,16 +20,10 @@ fn ghost(p: &Palette) -> Look {
     Look { fg: p.text, bg: Color32::TRANSPARENT, hover: p.hover_bg, round: false }
 }
 
-/// Texte sur une seule ligne, coupé avec « … ».
-fn elided(ui: &Ui, text: &str, font: FontId, color: Color32, max_w: f32) -> Arc<Galley> {
-    let mut job = LayoutJob::simple_singleline(text.to_owned(), font, color);
-    job.wrap = TextWrapping { max_width: max_w.max(10.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
-    ui.painter().layout_job(job)
-}
-
+/// En-tête de section (socle) avec l'espacement du panneau de droite.
 fn section(ui: &mut Ui, t: &str, p: &Palette) {
     ui.add_space(10.0);
-    ui.label(RichText::new(t.to_uppercase()).size(11.0).strong().color(p.muted));
+    socle::ui::section_header(ui, p, t);
     ui.add_space(4.0);
 }
 
@@ -160,7 +153,7 @@ impl App {
                                     let fill = if sel { p.surface } else if r.hovered() { p.hover_bg } else { p.chrome };
                                     ui.painter().rect_filled(rect, CornerRadius { nw: 9, ne: 9, sw: 0, se: 0 }, fill);
                                     ui.painter().circle_filled(pos2(rect.left() + 15.0, rect.center().y), 4.0, kind::color(t.kind));
-                                    let g = elided(ui, &t.name(), FontId::proportional(13.5), if sel { p.text } else { p.muted }, tab_w - 58.0);
+                                    let g = socle::ui::trunc(ui, &t.name(), FontId::proportional(13.5), if sel { p.text } else { p.muted }, tab_w - 58.0);
                                     ui.painter().galley(pos2(rect.left() + 27.0, rect.center().y - g.size().y / 2.0), g, p.text);
                                     let xr = Rect::from_center_size(pos2(rect.right() - 17.0, rect.center().y), vec2(22.0, 22.0));
                                     let xresp = ui.interact(xr, egui::Id::unique(("x", t.id)), Sense::click());
@@ -278,7 +271,7 @@ impl App {
                 ui.label(RichText::new(format!("Mise à jour v{} disponible", r.version)).color(p.text).strong());
                 let first = r.notes.lines().map(str::trim).find(|l| !l.is_empty() && !l.starts_with('#')).unwrap_or("");
                 if !first.is_empty() {
-                    let g = elided(ui, first.trim_start_matches(['-', '*', ' ']), FontId::proportional(12.5), p.muted, (ui.available_width() - 260.0).max(40.0));
+                    let g = socle::ui::trunc(ui, first.trim_start_matches(['-', '*', ' ']), FontId::proportional(12.5), p.muted, (ui.available_width() - 260.0).max(40.0));
                     ui.label(g);
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -315,6 +308,7 @@ impl App {
                 }
                 View::Pdf(v) => parts.push(format!("{} pages", v.pages)),
                 View::Docx(b) => parts.push(format!("{} mots", docx::word_count(b))),
+                View::DocxLoading(_) => parts.push("lecture…".into()),
                 View::Text(v) => {
                     parts.push(format!("{} lignes", v.text.lines().count()));
                     parts.push(if v.lossy { "non UTF-8".into() } else { "UTF-8".into() });
@@ -339,7 +333,7 @@ impl App {
                     // message éphémère du socle à la place des infos du fichier
                     self.toasts.ui(ui, &p);
                 } else {
-                    let g = elided(ui, &info.unwrap_or_else(|| "Prêt".into()), FontId::monospace(11.5), p.muted, ui.available_width() - right_w - 10.0);
+                    let g = socle::ui::trunc(ui, &info.unwrap_or_else(|| "Prêt".into()), FontId::monospace(11.5), p.muted, ui.available_width() - right_w - 10.0);
                     ui.label(g);
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -400,10 +394,10 @@ impl App {
                         ui.painter().rect_filled(b, CornerRadius::same(7), kind::color(k));
                         ui.painter().text(b.center(), Align2::CENTER_CENTER, kind::ext(path).to_uppercase(), FontId::monospace(9.5), Color32::WHITE);
                         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                        let g = elided(ui, &name, FontId::proportional(13.0), p.text, w - 62.0);
+                        let g = socle::ui::trunc(ui, &name, FontId::proportional(13.0), p.text, w - 62.0);
                         ui.painter().galley(pos2(rect.left() + 52.0, rect.top() + 9.0), g, p.text);
                         let pos = self.s.positions.get(&path.to_string_lossy().to_string()).map(|v| if k == Kind::Pdf { format!("page {}", *v as u32 + 1) } else { format!("reprendre à {}", hms(*v)) });
-                        let g = elided(ui, &pos.unwrap_or_else(|| kind::label(k).into()), FontId::proportional(11.5), p.muted, w - 62.0);
+                        let g = socle::ui::trunc(ui, &pos.unwrap_or_else(|| kind::label(k).into()), FontId::proportional(11.5), p.muted, w - 62.0);
                         ui.painter().galley(pos2(rect.left() + 52.0, rect.bottom() - 21.0), g, p.muted);
                         if r.clicked() {
                             open = Some(path.clone());
@@ -435,6 +429,9 @@ impl App {
             View::Image(v) => draw_image(ui, v, &p),
             View::Text(v) => draw_text(ui, v, &p, &mut self.s.search_history),
             View::Docx(b) => draw_docx(ui, b, &p),
+            View::DocxLoading(_) => {
+                ui.centered_and_justified(|ui| ui.label(RichText::new("Ouverture du document…").color(p.muted)));
+            }
             View::Pdf(v) => draw_pdf(ui, v, &p, &mut self.s.search_history),
             View::Media(m) => {
                 let playing = m.p.as_ref().map(|x| x.playing()).unwrap_or(false);
@@ -468,8 +465,9 @@ impl App {
         }
         let Some(t) = self.tabs.get(self.active) else { return };
         let name = t.name();
-        let list = kind::neighbours(&t.path);
-        let pos = list.iter().position(|q| *q == t.path);
+        let path = t.path.clone();
+        let list = self.neighbours(self.active);
+        let pos = list.iter().position(|q| *q == path);
         let r = ctx.content_rect();
         let mut show_panels = false;
         let mut close = false;
@@ -485,7 +483,7 @@ impl App {
                             nb = -1;
                         }
                     }
-                    let g = elided(ui, &name, FontId::proportional(14.0), LIGHT, (r.width() * 0.45).max(80.0));
+                    let g = socle::ui::trunc(ui, &name, FontId::proportional(14.0), LIGHT, (r.width() * 0.45).max(80.0));
                     ui.label(g);
                     if let Some(i) = pos.filter(|_| list.len() > 1) {
                         ui.label(RichText::new(format!("{} / {}", i + 1, list.len())).color(MUTED_DARK).size(12.0));
@@ -763,7 +761,7 @@ impl App {
                     section(ui, "Sous-titres", &p);
                     match &m.subs {
                         Some((name, cues)) => {
-                            let g = elided(ui, &format!("{name} · {} répliques", cues.len()), FontId::proportional(12.5), p.muted, w);
+                            let g = socle::ui::trunc(ui, &format!("{name} · {} répliques", cues.len()), FontId::proportional(12.5), p.muted, w);
                             ui.label(g);
                             ui.checkbox(&mut m.subs_on, "Afficher   V");
                             ui.horizontal(|ui| {
@@ -811,21 +809,13 @@ impl App {
                 }
                 ui.add_space(4.0);
                 if icons::wide(ui, Icon::Copy, &format!("Copier le texte de la page {}", pv.page + 1), "", w, None, &p).clicked() {
-                    let txt = match &pv.texts {
-                        Some(t) => t.get(pv.page as usize).cloned().unwrap_or_default(),
-                        None => crate::pdf::page_texts(&t.path.to_string_lossy()).ok().and_then(|t| t.get(pv.page as usize).cloned()).unwrap_or_default(),
-                    };
-                    if txt.trim().is_empty() {
-                        action = Some("pdf_notext");
-                    } else {
-                        ui.ctx().copy_text(txt);
-                        action = Some("pdf_copied");
-                    }
+                    // Le texte est extrait dans un fil ; la copie se fait dès qu'il arrive (tick).
+                    pv.copy_page = Some(pv.page);
                 }
                 ui.add_space(6.0);
                 ui.label(RichText::new("Pour tout le texte : onglet Convertir › TXT.").size(12.0).color(p.muted));
             }
-            View::Docx(_) => {
+            View::Docx(_) | View::DocxLoading(_) => {
                 ui.add_space(8.0);
                 ui.label(RichText::new("Document en lecture seule. Convertissez-le depuis l'onglet Convertir (PDF, texte, Markdown, images…).").color(p.muted));
             }
@@ -890,7 +880,7 @@ impl App {
                         egui::StrokeKind::Inside,
                     );
                     ui.painter().text(rect.min + vec2(12.0, 17.0), Align2::LEFT_CENTER, tg.label(), FontId::new(14.5, FontFamily::Name("bold".into())), p.text);
-                    let g = elided(ui, tg.hint(kind), FontId::proportional(11.5), p.muted, cw - 20.0);
+                    let g = socle::ui::trunc(ui, tg.hint(kind), FontId::proportional(11.5), p.muted, cw - 20.0);
                     ui.painter().galley(pos2(rect.left() + 12.0, rect.top() + 29.0), g, p.muted);
                     if r.clicked() {
                         self.target = Some(*tg);
@@ -1010,7 +1000,7 @@ impl App {
             let (rect, r) = ui.allocate_exact_size(vec2(w, 38.0), Sense::click_and_drag());
             ui.painter().rect(rect, CornerRadius::same(8), if r.hovered() { p.add_bg.gamma_multiply(1.1) } else { p.add_bg }, Stroke::new(1.0, p.add.gamma_multiply(0.5)), egui::StrokeKind::Inside);
             icons::paint(ui.painter(), Rect::from_center_size(pos2(rect.left() + 16.0, rect.center().y), Vec2::splat(16.0)), Icon::Drag, p.add);
-            let g = elided(ui, &name, FontId::proportional(13.0), p.text, w - 44.0);
+            let g = socle::ui::trunc(ui, &name, FontId::proportional(13.0), p.text, w - 44.0);
             ui.painter().galley(pos2(rect.left() + 32.0, rect.center().y - g.size().y / 2.0), g, p.text);
             let r = r.on_hover_text("Glissez vers l'Explorateur, Discord, un mail… — clic : ouvrir ici");
             if r.drag_started() {
@@ -1057,6 +1047,7 @@ impl App {
                 }
                 rows.push(("Rendu".into(), "Windows.Data.Pdf".into()));
             }
+            View::DocxLoading(_) => {}
             View::Docx(b) => {
                 rows.push(("Paragraphes".into(), b.iter().filter(|x| matches!(x, Block::Para { .. })).count().to_string()));
                 rows.push(("Tableaux".into(), b.iter().filter(|x| matches!(x, Block::Table(_))).count().to_string()));
@@ -1578,7 +1569,7 @@ fn draw_media(ui: &mut Ui, m: &mut MedV, kind: Kind, sel: &mut (Option<f64>, Opt
     }
     let full = ui.available_rect_before_wrap();
     let narrow = full.width() < 640.0;
-    let mut act = MediaAct::None;
+    let mut act;
     // Repères de la frise : points forts (L2) et phrases trouvées dans les sous-titres (L1)
     let mut marks: Vec<Mark> = m.moments.iter().flatten().map(|x| (x.t, p.live, format!("Point fort à {} · +{:.0} dB   (N suivant · E exporter ±10 s)", hms(x.t), x.gain))).collect();
     if m.sfind_open {
@@ -1977,15 +1968,16 @@ fn transport(ui: &mut Ui, r: Rect, pl: &mut Player, loop_sel: &mut bool, kind: K
         let bg = if sresp.hovered() { look.hover } else if dark { Color32::from_rgb(0x1C, 0x2D, 0x48) } else { p.soft };
         ui.painter().rect_filled(sr, CornerRadius::same(15), bg);
         ui.painter().text(sr.center(), Align2::CENTER_CENTER, label, FontId::monospace(12.5), fg);
-        let sresp = sresp.on_hover_text("Vitesse : clic = plus vite, clic droit = moins vite");
+        let sresp = sresp.on_hover_text("Vitesse : clic = plus vite, clic droit = moins vite, double-clic = 1×");
         const RATES: [f64; 7] = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
         let cur = RATES.iter().position(|v| (pl.rate - v).abs() < 1e-3).unwrap_or(3);
-        if sresp.clicked() {
+        // Le double-clic d'abord : egui signale aussi un clic sur le même appui.
+        if sresp.double_clicked() {
+            pl.set_rate(1.0);
+        } else if sresp.clicked() {
             pl.set_rate(RATES[(cur + 1) % RATES.len()]);
         } else if sresp.secondary_clicked() {
             pl.set_rate(RATES[(cur + RATES.len() - 1) % RATES.len()]);
-        } else if sresp.double_clicked() {
-            pl.set_rate(1.0);
         }
     });
     act

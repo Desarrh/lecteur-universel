@@ -125,11 +125,11 @@ pub fn human_size(b: u64) -> String {
 }
 
 pub fn hms(t: f64) -> String {
-    let t = t.max(0.0);
-    let m = (t / 60.0) as u64;
-    let s = t - m as f64 * 60.0;
+    // Arrondi au dixième AVANT le découpage (sinon 59,96 s s'affiche « 00:60,0 »)
+    let tenths = (t.max(0.0) * 10.0).round() as u64;
+    let (m, s) = (tenths / 600, (tenths % 600) as f64 / 10.0);
     if m >= 60 {
-        format!("{}:{:02}:{:04.1}", m / 60, m % 60, s)
+        format!("{}:{:02}:{:04.1}", m / 60, m % 60, s).replace('.', ",")
     } else {
         format!("{:02}:{:04.1}", m, s).replace('.', ",")
     }
@@ -141,7 +141,7 @@ pub fn neighbours(p: &Path) -> Vec<std::path::PathBuf> {
     let mut v: Vec<_> = std::fs::read_dir(dir)
         .map(|rd| rd.flatten().map(|e| e.path()).filter(|q| q.is_file() && supported(q)).collect())
         .unwrap_or_default();
-    v.sort_by_key(|q| q.file_name().map(|n| n.to_string_lossy().to_lowercase()));
+    v.sort_by_cached_key(|q| q.file_name().map(|n| n.to_string_lossy().to_lowercase()));
     v
 }
 

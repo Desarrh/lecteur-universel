@@ -2,7 +2,7 @@
 
 **A lightweight universal file viewer, editor and converter for Windows, written in Rust.**
 Open almost any file — documents, images, audio, video, code — and convert it to another format in one click.
-Small single `.exe` (~12 MB), instant start-up, no runtime to install, no ffmpeg bundled: decoding and encoding are delegated to what Windows already ships (Media Foundation, Windows.Data.Pdf, WIC).
+Small single `.exe` (~16 MB), instant start-up, no runtime to install, no ffmpeg bundled: decoding and encoding are delegated to what Windows already ships (Media Foundation, Windows.Data.Pdf, WIC).
 
 > The user interface is in **French** (the author's language). This README is in English.
 
@@ -19,7 +19,7 @@ Small single `.exe` (~12 MB), instant start-up, no runtime to install, no ffmpeg
 2. Unzip anywhere and run `lecteur-universel.exe`. Nothing to install.
 3. Optional: menu **⋯ › « Ajouter à "Ouvrir avec" de Windows »** registers the app in Explorer's *Open with* menu (per-user, no admin rights).
 
-**Automatic updates:** at start-up (at most once a day) the app asks GitHub for the latest release using Windows' built-in `curl.exe`. When a newer version exists, a banner offers *Installer et relancer*: the zip is downloaded to `%TEMP%`, the running exe is renamed to `.old`, the new one takes its place and the app restarts. You can disable the daily check or check manually from the **⋯** menu.
+**Automatic updates:** at start-up (at most once a day) the app asks GitHub for the latest release using Windows' built-in `curl.exe`. When a newer version exists, a banner offers *Installer et relancer*: the zip is downloaded to `%TEMP%` (only from github.com over HTTPS, and only if its SHA-256 matches the release), the running exe is renamed to `.old`, the new one takes its place and the app restarts. You can disable the daily check or check manually from the **⋯** menu.
 
 Requirements: Windows 10 or 11, x64.
 
@@ -27,12 +27,12 @@ Requirements: Windows 10 or 11, x64.
 
 | Type | View | Edit | Convert to |
 |---|---|---|---|
-| **Images** png, jpg/jpeg, webp, gif (animated), bmp, ico, tif/tiff — plus **HEIC/HEIF, AVIF, JPEG XR, camera RAW** (dng, cr2, cr3, nef, arw…) through Windows' own decoders | zoom (Ctrl + wheel, + / −, 0, 1), transparency checkerboard, animated GIF playback | rotate, mirror, crop (rule of thirds), resize, undo | **PDF** (A4 page per image, 1 cm margins, auto orientation; several images can be merged into one PDF; optional *scanned document* look that removes shadows and whitens the paper — handy for official papers photographed with a phone), PNG, JPG (quality), WEBP (lossy or lossless), BMP, TIFF, ICO, GIF |
+| **Images** png, jpg/jpeg, webp, gif (animated), bmp, ico, tif/tiff, tga, qoi, hdr, dds, **psd, svg, exr** — plus **HEIC/HEIF, AVIF, JPEG XR, JPEG XL, camera RAW** (dng, cr2, cr3, nef, arw…) through Windows' own decoders | zoom (Ctrl + wheel, + / −, 0, 1), transparency checkerboard, animated GIF playback | rotate, mirror, crop (rule of thirds), resize, undo | **PDF** (A4 page per image, 1 cm margins, auto orientation; several images can be merged into one PDF; optional *scanned document* look that removes shadows and whitens the paper — handy for official papers photographed with a phone), PNG, JPG (quality), WEBP (lossy or lossless), BMP, TIFF, ICO, GIF |
 | **PDF** | continuous pages, zoom, remembers the page, **text search (Ctrl+F)** with jump to page and excerpt, copy a page's text | — | PNG / JPG / WEBP (one image per page, ~200 dpi), **TXT**, HTML |
 | **Word** .docx | headings, bold/italic, lists, tables, **embedded images** | — | PDF (**built-in PDF writer, no Microsoft Word needed**, images included; if Word happens to be installed it is used for a pixel-perfect layout), TXT, Markdown, HTML (images embedded) |
 | **Text & code** (txt, md, json, toml, yaml, xml, html, css, js, ts, rs, py, c/cpp, cs, java, go, sh, ps1, sql, lua, gd, srt…) | syntax highlighting, line numbers (correct even with word wrap), current line, **Markdown preview** (Ctrl+E) | full editing, **find / replace** (Ctrl+F / Ctrl+H, match case, replace all), **go to line** (Ctrl+G), Ctrl+S saves the file (previous version kept as a backup) | PDF, HTML, TXT |
-| **Audio** mp3, wav, m4a/aac, flac, wma | waveform, speed 0.25×–2×, loop | trim (MP3 is cut **without re-encoding**) | MP3 (128/192/320 kbit/s), WAV |
-| **Video** mp4, mov, m4v, mkv, avi, wmv | thumbnail timeline, frame by frame, speed 0.25×–2×, frame capture (PNG + clipboard), **subtitles** (.srt / .vtt next to the video or dropped on it, adjustable offset) | trim with handles: **fast** (no re-encoding, keyframe-aligned) or **frame-accurate** (re-encoded H.264) | MP4 (resize / quality), optimised GIF, MP3, WAV, PNG |
+| **Audio** mp3, wav, m4a/aac, flac, wma, ogg | waveform, speed 0.25×–2×, loop | trim (MP3 is cut **without re-encoding**) | MP3 (128/192/320 kbit/s), WAV |
+| **Video** mp4, mov, m4v, mkv, avi, wmv, webm (with the matching codecs) | thumbnail timeline, frame by frame, speed 0.25×–2×, frame capture (PNG + clipboard), **subtitles** (.srt / .vtt next to the video or dropped on it, adjustable offset) | trim with handles: **fast** (no re-encoding, keyframe-aligned) or **frame-accurate** (re-encoded H.264) | MP4 (resize / quality), optimised GIF, MP3, WAV, PNG |
 
 Conversions follow a **hub graph** (inspired by ConvertX / VERT): every input decodes to a hub (raster image, PCM audio, frame sequence, document, text) and every output encodes from a hub, so available targets are derived automatically and adding a format means adding one decoder or one encoder (`src/convert.rs`).
 
@@ -53,20 +53,22 @@ Results are saved next to the original (never overwritten) and can be **dragged*
 |---|---|
 | Ctrl+K · F1 | command palette (every action, fuzzy search) · all shortcuts |
 | Ctrl+F (video) | find a spoken line in the subtitles: blue marks on the timeline, Enter jumps to the next one |
-| N · Shift+N · E | next / previous highlight (sudden loud moments of a game recording, orange marks) · export ±10 s around it |
+| N · Shift+N · E | next / previous highlight (sudden loud moments of a video longer than 20 s, orange marks) · export ±10 s around it |
 | Space / K | play / pause |
 | ← → (Shift: 1 s) · J / L | seek ±5 s · ±10 s |
+| ↑ ↓ · Home · Shift+Home | volume ±10 % · start · start of the selection |
 | , . | previous / next frame |
 | I / O (or [ ]) | trim start / end here — X: keep everything |
-| Shift+Home | jump back to the start of the selection |
 | Media keys | play / pause, next / previous file — also from the Windows media flyout, even when the window is in the background |
-| Esc · Space (quick preview) | close the preview opened with `--apercu` (separate instance, ← → open the neighbour file) |
+| Esc · Space (quick preview) | hide the preview opened with `--apercu` (separate instance that stays ready in the background, ← → open the neighbour file) |
 | C | capture the current video frame |
 | V · G / H | subtitles on/off · subtitle offset −/+ 0.1 s |
 | Ctrl+F · Ctrl+H · Ctrl+G · Ctrl+E | find (with autocomplete: Tab completes) · replace · go to line · Markdown preview (text, code; Ctrl+F also searches PDFs) |
 | Speed pill | click: faster · right click: slower · double click: 1× |
 | Tab · F / F11 | clean view · full screen |
-| Ctrl+O · Ctrl+W · Ctrl+Tab | open · close tab · next tab |
+| Ctrl+O · Ctrl+W · Ctrl+Tab / Ctrl+Shift+Tab | open · close tab · next / previous tab |
+| PDF: ← → · + − | previous / next page · zoom |
+| Image: ← → · + − 0 1 | neighbour file · zoom (0 fit, 1 = 100 %) |
 | Ctrl+S · Ctrl+Shift+S | text/code: save the file · save a copy — images: save a copy · replace the original |
 | R / Shift+R · Ctrl+Z | rotate image · undo |
 
@@ -76,8 +78,8 @@ Measured on the author's machine (Windows 11, NVIDIA GPU, 5120×1440 monitor), r
 
 | | |
 |---|---|
-| Executable | ~12 MB, single file, no dependencies |
-| Start-up | 0.1 – 0.5 s to first frame |
+| Executable | ~16 MB, single file, no dependencies |
+| Start-up | 70 – 150 ms to first frame (measured with `LECTEUR_TRACE`) |
 
 | File open | Private RAM |
 |---|---|
@@ -104,21 +106,29 @@ cargo build --release
 target\release\lecteur-universel.exe [files…]
 ```
 
-Main crates: `egui` / `egui-winit` / `winit`, `softbuffer` + `hdrshot-egui-backend` (CPU renderer), `windows` (Media Foundation, WinRT PDF, WIC, Direct3D 11, Win32), `image`, `webp`, `gif`, `hound`, `zip`, `quick-xml`, `lopdf` (PDF text), `flate2`, `egui_extras` (syntax highlighting).
+Main crates: [`socle`](https://github.com/Desarrh/socle) (shared theme, icons, command palette, image decoders, single instance, updates), `egui` / `egui-winit` / `winit`, `softbuffer` + `hdrshot-egui-backend` (CPU renderer), `windows` (Media Foundation, WinRT PDF, WIC, Direct3D 11, Win32), `image`, `webp`, `gif`, `hound`, `zip`, `quick-xml`, `lopdf` (PDF text), `flate2`, `egui_extras` (syntax highlighting), `drag`, `serde`.
 
 ### Command line & tests
 
 ```
 lecteur-universel --convert webp photo1.png photo2.jpg      # convert without opening a window
-lecteur-universel --cut rapide|precis|720p in.mp4 3 9 out.mp4
 lecteur-universel --assembler-pdf out.pdf [--scan] scan1.jpg scan2.jpg   # images → one PDF
-lecteur-universel --generer-tests tests 5120 1440 60 60     # generate a folder with every supported format
-lecteur-universel --selftest <folder with i.png i.jpg k.rs a.mp3 v.mp4>   # 7 automated editing tests
+lecteur-universel --apercu photo.jpg                        # quick preview (separate instance); --fermer-apercu hides it
 ```
 
-`--generer-tests` builds the test set used during development: images (a HEIC photo too when Windows' HEVC extension is installed), audio (mp3, wav, m4a, wma, flac), docx + pdf, 27 text/code files, short videos (one with a French `.srt` subtitle file) and a synthetic video at your screen resolution (frame counter, sweeping bar, bouncing square, flash + beep every second, so stutter or A/V drift is obvious). It is not stored in the repository because of its size.
+Development tools, only in a `cargo build --release --features dev` build:
 
-Test switches: `LECTEUR_SHOT=out.png` (+ `LECTEUR_SHOT_MS`, `LECTEUR_SIZE=800x560`, `LECTEUR_DARK`, `LECTEUR_RAIL`, `LECTEUR_PANELS`) renders and saves a screenshot, `LECTEUR_EVENTS="1000:move 30 780;1100:down;1300:move 300 780;1400:up"` replays mouse/keyboard input, `LECTEUR_FPS=1` prints rendering and decoding rates.
+```
+lecteur-universel --cut rapide|precis|720p in.mp4 3 9 out.mp4
+lecteur-universel --generer-tests tests 5120 1440 60 60     # generate a folder with every supported format
+lecteur-universel --generer-partie <folder>                 # 60 s game-like video with three explosions + subtitles
+lecteur-universel --selftest <folder with i.png i.jpg k.rs a.mp3 v.mp4>   # 14 automated tests
+lecteur-universel --thumbs video.mp4                        # time the timeline thumbnails
+```
+
+`--generer-tests` builds the test set used during development: images (a HEIC photo too when Windows' HEVC extension is installed), audio (mp3, wav, m4a, wma, flac), docx + pdf, 27 text/code files, short videos (one with a French `.srt` subtitle file), the 60 s game-like video with its subtitles and a synthetic video at your screen resolution (frame counter, sweeping bar, bouncing square, flash + beep every second, so stutter or A/V drift is obvious). It is not stored in the repository because of its size.
+
+Test switches (tests never disturb the user: the window is invisible and never takes the focus, sound is muted, settings are not written): `LECTEUR_SHOT=out.png` (+ `LECTEUR_SHOT_MS`, `LECTEUR_SIZE=800x560`, `LECTEUR_DARK`, `LECTEUR_RAIL`, `LECTEUR_PANELS`) renders and saves a screenshot, `LECTEUR_EVENTS="1000:move 30 780;1100:down;1300:move 300 780;1400:up"` replays mouse/keyboard input, `LECTEUR_FPS=1` prints rendering and decoding rates, `LECTEUR_TRACE=file` logs start-up steps. The full list is in [STACK.md](STACK.md) §5.
 
 ## Known limitations
 

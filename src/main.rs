@@ -13,6 +13,7 @@ mod montage;
 mod pdfgen;
 mod smtc;
 mod subs;
+#[cfg(feature = "dev")]
 mod testgen;
 mod update;
 mod vidwin;
@@ -516,7 +517,7 @@ impl ApplicationHandler<UserEvent> for Runner {
                     g.window.set_minimized(true);
                 }
             }
-            if empty && self.launch_preview && self.app.as_ref().is_some_and(|a| a.video_used) {
+            if empty && self.launch_preview && self.app.as_ref().is_some_and(|a| a.video_used && !a.busy()) {
                 // Après une vidéo, le pilote graphique reste chargé (≈ 90 Mo que Windows ne rend
                 // pas). On passe la main à une instance de veille neuve et légère, puis on quitte.
                 if let Ok(exe) = std::env::current_exe() {
@@ -583,6 +584,58 @@ fn window_icon() -> Option<winit::window::Icon> {
 
 /// `lecteur-universel --convert <format> <fichiers…>` : conversion sans fenêtre
 /// (pour un futur menu « Convertir en… » de l'explorateur).
+/// Outils de développement (`cargo build --features dev`) : autotest, coupe en ligne de commande,
+/// génération des fichiers de test, vignettes. Absents de l'exe distribué.
+#[cfg(feature = "dev")]
+fn dev_cli(args: &[String]) {
+    if args.first().map(|a| a == "--selftest").unwrap_or(false) && args.len() > 1 {
+        media::init_thread();
+        let ctx = egui::Context::default();
+        let r = app::App::selftest(&ctx, std::path::Path::new(&args[1]));
+        let ko = r.iter().filter(|x| !x.1).count();
+        for (n, ok, d) in r {
+            println!("{} {n} — {d}", if ok { "OK   " } else { "ÉCHEC" });
+        }
+        std::process::exit(if ko > 0 { 1 } else { 0 });
+    }
+    // lecteur-universel --cut rapide|precis|720p <fichier> <début s> <fin s> <sortie>
+    if args.first().map(|a| a == "--cut").unwrap_or(false) && args.len() >= 6 {
+        media::init_thread();
+        let (t0, t1): (f64, f64) = (args[3].parse().unwrap_or(0.0), args[4].parse().unwrap_or(10.0));
+        let r = match args[1].as_str() {
+            "rapide" => montage::remux(&args[2], &args[5], t0, t1, &|_| {}),
+            "720p" => montage::transcode(&args[2], &args[5], t0, t1, 720, 4000, &|_| {}),
+            _ => montage::transcode(&args[2], &args[5], t0, t1, 0, 8000, &|_| {}),
+        };
+        println!("{r:?}");
+        std::process::exit(if r.is_ok() { 0 } else { 1 });
+    }
+    // lecteur-universel --generer-tests <dossier> [largeur hauteur ips secondes]
+    // --generer-partie <dossier> : seulement la vidéo « partie de jeu » + ses sous-titres (tests L1 / L2)
+    if args.first().map(|a| a == "--generer-partie").unwrap_or(false) && args.len() > 1 {
+        media::init_thread();
+        let (a, b) = testgen::game_sample(std::path::Path::new(&args[1]));
+        println!("vidéo : {a:?} · sous-titres : {b:?}");
+        std::process::exit(0);
+    }
+    if args.first().map(|a| a == "--generer-tests").unwrap_or(false) && args.len() > 1 {
+        media::init_thread();
+        let n = |i: usize, d: u32| args.get(i).and_then(|v| v.parse().ok()).unwrap_or(d);
+        testgen::generate(std::path::Path::new(&args[1]), (n(2, 5120), n(3, 1440), n(4, 60), n(5, 60)), &|l| println!("{l}"));
+        std::process::exit(0);
+    }
+    if args.first().map(|a| a == "--thumbs").unwrap_or(false) && args.len() > 1 {
+        media::init_thread();
+        let t0 = std::time::Instant::now();
+        let r = montage::video_thumbs(&args[1], 40, 200, &|i, img| { println!("{i} {}x{} {:?}", img.width(), img.height(), t0.elapsed()); true });
+        println!("{r:?} {:?}", t0.elapsed());
+        std::process::exit(0);
+    }
+}
+
+#[cfg(not(feature = "dev"))]
+fn dev_cli(_: &[String]) {}
+
 fn cli_convert(args: &[String]) -> i32 {
     let Some(fmt) = args.first() else { return 2 };
     media::init_thread();
@@ -656,49 +709,7 @@ fn main() {
     if after_update {
         std::thread::sleep(std::time::Duration::from_millis(1500));
     }
-    if args.first().map(|a| a == "--selftest").unwrap_or(false) && args.len() > 1 {
-        media::init_thread();
-        let ctx = egui::Context::default();
-        let r = app::App::selftest(&ctx, std::path::Path::new(&args[1]));
-        let ko = r.iter().filter(|x| !x.1).count();
-        for (n, ok, d) in r {
-            println!("{} {n} — {d}", if ok { "OK   " } else { "ÉCHEC" });
-        }
-        std::process::exit(if ko > 0 { 1 } else { 0 });
-    }
-    // lecteur-universel --cut rapide|precis|720p <fichier> <début s> <fin s> <sortie>
-    if args.first().map(|a| a == "--cut").unwrap_or(false) && args.len() >= 6 {
-        media::init_thread();
-        let (t0, t1): (f64, f64) = (args[3].parse().unwrap_or(0.0), args[4].parse().unwrap_or(10.0));
-        let r = match args[1].as_str() {
-            "rapide" => montage::remux(&args[2], &args[5], t0, t1, &|_| {}),
-            "720p" => montage::transcode(&args[2], &args[5], t0, t1, 720, 4000, &|_| {}),
-            _ => montage::transcode(&args[2], &args[5], t0, t1, 0, 8000, &|_| {}),
-        };
-        println!("{r:?}");
-        std::process::exit(if r.is_ok() { 0 } else { 1 });
-    }
-    // lecteur-universel --generer-tests <dossier> [largeur hauteur ips secondes]
-    // --generer-partie <dossier> : seulement la vidéo « partie de jeu » + ses sous-titres (tests L1 / L2)
-    if args.first().map(|a| a == "--generer-partie").unwrap_or(false) && args.len() > 1 {
-        media::init_thread();
-        let (a, b) = testgen::game_sample(std::path::Path::new(&args[1]));
-        println!("vidéo : {a:?} · sous-titres : {b:?}");
-        return;
-    }
-    if args.first().map(|a| a == "--generer-tests").unwrap_or(false) && args.len() > 1 {
-        media::init_thread();
-        let n = |i: usize, d: u32| args.get(i).and_then(|v| v.parse().ok()).unwrap_or(d);
-        testgen::generate(std::path::Path::new(&args[1]), (n(2, 5120), n(3, 1440), n(4, 60), n(5, 60)), &|l| println!("{l}"));
-        return;
-    }
-    if args.first().map(|a| a == "--thumbs").unwrap_or(false) && args.len() > 1 {
-        media::init_thread();
-        let t0 = std::time::Instant::now();
-        let r = montage::video_thumbs(&args[1], 40, 200, &|i, img| { println!("{i} {}x{} {:?}", img.width(), img.height(), t0.elapsed()); true });
-        println!("{r:?} {:?}", t0.elapsed());
-        return;
-    }
+    dev_cli(&args);
     // lecteur-universel --assembler-pdf sortie.pdf [--scan] image1 image2 … (une page par image)
     if args.first().map(|a| a == "--assembler-pdf").unwrap_or(false) && args.len() > 2 {
         let scan = args.iter().any(|a| a == "--scan");
@@ -720,7 +731,14 @@ fn main() {
     let launch: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).filter(|p| p.exists()).map(|p| std::path::absolute(&p).unwrap_or(p)).collect();
     // --apercu : aperçu rapide (Espace dans l'Explorateur), Échap le referme
     // --fermer-apercu : referme l'aperçu affiché (pour l'explorateur, et pour les tests sans clavier)
-    if args.iter().any(|a| a == "--fermer-apercu") {
+    // --quitter-apercu : l'instance d'aperçu (même en veille) se termine (mise à jour installée)
+    for flag in ["--fermer-apercu", "--quitter-apercu"] {
+        if args.iter().any(|a| a == flag) {
+            let r = socle::instance::start(&instance_name(true), &[flag.to_string()]);
+            std::process::exit(if matches!(r, socle::instance::Start::Forwarded) { 0 } else { 1 });
+        }
+    }
+    if false {
         let r = socle::instance::start(&instance_name(true), &["--fermer-apercu".to_string()]);
         std::process::exit(if matches!(r, socle::instance::Start::Forwarded) { 0 } else { 1 });
     }
@@ -765,6 +783,9 @@ fn main() {
     if let Some(inst) = primary {
         inst.listen(move |args| {
             trace("tube : message lu");
+            if launch_preview && args.iter().any(|a| a == "--quitter-apercu") {
+                std::process::exit(0);
+            }
             let close = args.iter().any(|a| a == "--fermer-apercu");
             let preview = launch_preview || args.iter().any(|a| a == "--apercu");
             let paths: Vec<PathBuf> = args.iter().filter(|a| !a.starts_with("--")).map(PathBuf::from).collect();

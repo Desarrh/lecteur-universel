@@ -1,10 +1,15 @@
 [package]
 name = "lecteur-universel"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 description = "Lightweight universal file viewer and converter for Windows"
 license = "MIT"
 repository = "https://github.com/Desarrh/lecteur-universel"
+
+[features]
+# Outils de développement : --selftest, --cut, --generer-tests, --generer-partie, --thumbs,
+# encodeur HEIC de test. `cargo build --release --features dev` ; absents de l'exe distribué.
+dev = []
 
 [dependencies]
 egui = "0.37.0"

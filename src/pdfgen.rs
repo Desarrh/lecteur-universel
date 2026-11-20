@@ -6,21 +6,61 @@
 use crate::docx::Block;
 use std::path::Path;
 
-/// DOCX → PDF via Word. Renvoie Err si Word n'est pas là ou a échoué.
+/// DOCX → PDF via Word. Renvoie Err si Word n'est pas là, a échoué ou a dépassé 60 s.
+/// Les chemins passent par des variables d'environnement : aucun nom de fichier n'entre dans le
+/// texte du script (PowerShell accepte aussi ’ ‘ ‚ ‛ comme guillemets, l'échappement ne suffit pas).
+/// Mot de passe factice : un document protégé échoue au lieu d'ouvrir une boîte invisible.
 pub fn word_export(src: &Path, out: &Path) -> Result<(), String> {
-    let esc = |p: &Path| p.to_string_lossy().replace('\'', "''");
-    let script = format!(
-        "$ErrorActionPreference='Stop'; $w=New-Object -ComObject Word.Application; $w.Visible=$false; $w.DisplayAlerts=0; \
-         try {{ $d=$w.Documents.Open('{}', $false, $true); $d.ExportAsFixedFormat('{}', 17); $d.Close(0) }} finally {{ $w.Quit() }}",
-        esc(src),
-        esc(out)
-    );
-    let st = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &script])
+    use std::io::BufRead;
+    const SCRIPT: &str = "$ErrorActionPreference='Stop'; $avant=@(Get-Process WINWORD -ErrorAction SilentlyContinue | % Id); \
+        $w=New-Object -ComObject Word.Application; \
+        $n=@(Get-Process WINWORD -ErrorAction SilentlyContinue | % Id | ? { $avant -notcontains $_ }); \
+        if ($n.Count -eq 1) { [Console]::Out.WriteLine('WORD:' + $n[0]); [Console]::Out.Flush() }; \
+        $w.Visible=$false; $w.DisplayAlerts=0; \
+        try { $d=$w.Documents.Open($env:LU_SRC, $false, $true, $false, 'x'); $d.ExportAsFixedFormat($env:LU_OUT, 17); $d.Close(0) } finally { $w.Quit() }";
+    let mut child = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", SCRIPT])
+        .env("LU_SRC", src)
+        .env("LU_OUT", out)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
         .creation_flags_no_window()
-        .output()
+        .spawn()
         .map_err(|e| e.to_string())?;
-    if st.status.success() && out.exists() { Ok(()) } else { Err("Word indisponible".into()) }
+    // PID du Word lancé pour nous (pour l'arrêter, lui seulement, en cas de blocage)
+    let word_pid = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    if let Some(so) = child.stdout.take() {
+        let wp = word_pid.clone();
+        std::thread::spawn(move || {
+            for l in std::io::BufReader::new(so).lines().map_while(Result::ok) {
+                if let Some(pid) = l.trim().strip_prefix("WORD:").and_then(|x| x.parse().ok()) {
+                    wp.store(pid, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        });
+    }
+    let t0 = std::time::Instant::now();
+    let ok = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break st.success(),
+            Ok(None) if t0.elapsed() < std::time::Duration::from_secs(60) => std::thread::sleep(std::time::Duration::from_millis(100)),
+            _ => {
+                let _ = child.kill();
+                let pid = word_pid.load(std::sync::atomic::Ordering::Relaxed);
+                if pid != 0 {
+                    unsafe {
+                        use windows::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
+                        if let Ok(h) = OpenProcess(PROCESS_TERMINATE, false, pid) {
+                            let _ = TerminateProcess(h, 1);
+                            let _ = windows::Win32::Foundation::CloseHandle(h);
+                        }
+                    }
+                }
+                break false;
+            }
+        }
+    };
+    if ok && out.exists() { Ok(()) } else { Err("Word indisponible".into()) }
 }
 
 trait NoWindow {
@@ -237,7 +277,7 @@ impl Writer {
         let n = self.pages.len();
         let mut out: Vec<u8> = b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n".to_vec();
         let mut offs = Vec::new();
-        let mut obj = |out: &mut Vec<u8>, offs: &mut Vec<usize>, body: Vec<u8>| {
+        let obj = |out: &mut Vec<u8>, offs: &mut Vec<usize>, body: Vec<u8>| {
             offs.push(out.len());
             out.extend_from_slice(format!("{} 0 obj\n", offs.len()).as_bytes());
             out.extend_from_slice(&body);

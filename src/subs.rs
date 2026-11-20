@@ -57,6 +57,9 @@ pub fn parse(text: &str) -> Vec<Cue> {
 }
 
 pub fn load(path: &Path) -> Option<Vec<Cue>> {
+    if std::fs::metadata(path).ok()?.len() > 20 << 20 {
+        return None; // un fichier de sous-titres de plus de 20 Mo n'en est pas un
+    }
     let bytes = std::fs::read(path).ok()?;
     let text = match String::from_utf8(bytes) {
         Ok(s) => s,
