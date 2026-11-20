@@ -94,6 +94,24 @@ pub fn spawn(path: PathBuf, wake: Arc<dyn Fn() + Send + Sync>, cancel: socle::Ca
     rx
 }
 
+/// Purge le cache des points forts (au démarrage, sur un fil) : entrées de plus de 90 jours,
+/// puis les plus anciennes jusqu'à 20 Mo au total.
+pub fn prune_cache() {
+    let dir = socle::paths::cache_dir(crate::APP).join("points-forts");
+    let Ok(rd) = std::fs::read_dir(&dir) else { return };
+    let mut files: Vec<(std::time::SystemTime, u64, PathBuf)> =
+        rd.flatten().filter_map(|e| e.metadata().ok().map(|m| (m.modified().unwrap_or(std::time::UNIX_EPOCH), m.len(), e.path()))).collect();
+    files.sort_by_key(|f| std::cmp::Reverse(f.0));
+    let mut total = 0u64;
+    for (t, len, p) in files {
+        total += len;
+        let old = t.elapsed().map(|a| a.as_secs() > 90 * 24 * 3600).unwrap_or(false);
+        if old || total > 20 << 20 {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
 /// Annule un travail quand son propriétaire disparaît (onglet fermé).
 pub struct CancelOnDrop(pub socle::Cancel);
 

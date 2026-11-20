@@ -114,6 +114,7 @@ Main crates: [`socle`](https://github.com/Desarrh/socle) (shared theme, icons, c
 lecteur-universel --convert webp photo1.png photo2.jpg      # convert without opening a window
 lecteur-universel --assembler-pdf out.pdf [--scan] scan1.jpg scan2.jpg   # images → one PDF
 lecteur-universel --apercu photo.jpg                        # quick preview (separate instance); --fermer-apercu hides it
+lecteur-universel --formats pdf                             # possible conversions as JSON (no window)
 ```
 
 Development tools, only in a `cargo build --release --features dev` build:

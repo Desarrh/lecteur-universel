@@ -301,6 +301,7 @@ impl Runner {
             return; // l'instance d'aperçu ne touche pas aux réglages de la fenêtre de travail
         }
         if let Some(app) = self.app.as_mut() {
+            app.settings_flush();
             let mut s = app.save_state();
             if let Some(g) = &self.gfx {
                 if !app.fullscreen && !g.window.is_maximized() {
@@ -724,6 +725,21 @@ fn main() {
         println!("{} pages : {r:?}", pages.len());
         std::process::exit(if r.is_ok() { 0 } else { 1 });
     }
+    // --formats <ext ou fichier> : conversions possibles en JSON (sans fenêtre, < 1 ms), pour que
+    // l'explorateur n'ait pas à recopier la liste. Marqueur « LecteurCli » dans la ressource de version.
+    if args.first().map(|a| a == "--formats").unwrap_or(false) {
+        let arg = args.get(1).cloned().unwrap_or_default();
+        let p = if arg.contains('.') && !arg.starts_with('.') { PathBuf::from(&arg) } else { PathBuf::from(format!("x.{}", arg.trim_start_matches('.'))) };
+        let ext = kind::ext(&p);
+        let k = kind::of(&p);
+        let targets: Vec<serde_json::Value> = convert::targets(k, &ext)
+            .into_iter()
+            .map(|t| serde_json::json!({ "ext": t.ext(), "label": t.label(), "detail": t.hint(k) }))
+            .collect();
+        let out = serde_json::json!({ "version": env!("CARGO_PKG_VERSION"), "ext": ext, "supported": k != kind::Kind::Unknown, "targets": targets });
+        println!("{out}");
+        std::process::exit(0);
+    }
     if args.first().map(|a| a == "--convert").unwrap_or(false) {
         std::process::exit(cli_convert(&args[1..]));
     }
@@ -747,7 +763,7 @@ fn main() {
     let standby = args.iter().any(|a| a == "--apercu-veille");
     if standby {
         if let Some(pid) = args.iter().skip_while(|a| *a != "--apercu-veille").nth(1).and_then(|p| p.parse::<u32>().ok()) {
-            wait_process(pid, 3000);
+            wait_process(pid, 10_000); // le démontage du pilote graphique peut prendre plusieurs secondes sous charge
         }
     }
     let launch_preview = (args.iter().any(|a| a == "--apercu") && !launch.is_empty()) || standby;
@@ -765,6 +781,8 @@ fn main() {
         match socle::instance::start(&instance_name(launch_preview), &fwd) {
             socle::instance::Start::Forwarded => return,
             socle::instance::Start::Primary(i) => primary = Some(i),
+            // Une veille qui ne peut pas écouter le tube ne servirait à rien : elle s'arrête.
+            socle::instance::Start::Alone if standby => std::process::exit(0),
             socle::instance::Start::Alone => {}
         }
         trace("instance unique");

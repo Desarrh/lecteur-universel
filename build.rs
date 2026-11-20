@@ -8,6 +8,8 @@ fn main() {
             .set("ProductName", "Lecteur universel")
             .set("InternalName", "lecteur-universel")
             .set("OriginalFilename", "lecteur-universel.exe")
+            // Marqueur pour les autres applis (comme VigieCli) : options de ligne de commande prises en charge
+            .set("LecteurCli", "formats apercu fermer-apercu quitter-apercu convert assembler-pdf")
             .set("LegalCopyright", "");
         if let Err(e) = res.compile() {
             println!("cargo:warning=icône non intégrée : {e}");

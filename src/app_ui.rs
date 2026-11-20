@@ -58,6 +58,7 @@ impl App {
     pub fn draw(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
         self.tick(&ctx);
+        self.autosave(&ctx);
         self.keys(&ctx);
         self.occl.clear();
         let p = self.pal;
@@ -202,7 +203,7 @@ impl App {
                         if ui.checkbox(&mut auto, "Vérifier automatiquement (1 fois par jour)").changed() {
                             self.s.no_auto_update = !auto;
                         }
-                        ui.label(RichText::new(format!("Lecteur universel v{} · github.com/{}", env!("CARGO_PKG_VERSION"), crate::update::REPO)).size(11.5).color(p.muted));
+                        ui.label(RichText::new(format!("Lecteur universel v{} · socle v{} · github.com/{}", env!("CARGO_PKG_VERSION"), socle::VERSION, crate::update::REPO)).size(11.5).color(p.muted));
                         ui.separator();
                         ui.label(
                             RichText::new(

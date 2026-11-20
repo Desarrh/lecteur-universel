@@ -26,7 +26,7 @@ use std::time::Instant;
 // ---------------------------------------------------------------------------
 // Réglages persistants
 
-#[derive(Serialize, Deserialize, Default, Clone)]
+#[derive(Serialize, Deserialize, Default, Clone, PartialEq)]
 #[serde(default)]
 pub struct Settings {
     pub dark: bool,
@@ -332,6 +332,9 @@ pub struct App {
     pub video_used: bool,
     /// Aperçu refermé : masquer la fenêtre (plus d'onglet) ou la réduire ; l'instance reste prête
     pub want_hide: bool,
+    /// Écriture différée des réglages (2 s après un changement, sur un fil), et dernier état écrit
+    saver: socle::settings::Saver,
+    saved: Settings,
 }
 
 /// État à rétablir quand l'aperçu rapide se ferme.
@@ -350,6 +353,9 @@ impl App {
         let pal = theme::palette(s.dark);
         // Gras pour les titres (Word, Markdown, sous-titres) ; pas d'emoji (13 Mo de RAM)
         theme::install_fonts_with(ctx, theme::FontOptions { bold: true, ..Default::default() });
+        if !crate::discret() {
+            std::thread::spawn(crate::moments::prune_cache);
+        }
         theme::apply(ctx, &pal);
         let c2 = ctx.clone();
         App {
@@ -389,6 +395,8 @@ impl App {
             preview_only: false,
             video_used: false,
             want_hide: false,
+            saver: socle::settings::Saver::new(std::time::Duration::from_secs(2)),
+            saved: s.clone(),
             title: "Lecteur universel".into(),
             s,
         }
@@ -663,7 +671,8 @@ impl App {
     fn load(&mut self, _ctx: &egui::Context, path: PathBuf, autoplay: bool) -> Tab {
         self.remember(&path);
         let k = kind::of(&path);
-        self.video_used |= k == Kind::Video;
+        // Vidéo et PDF chargent le pilote graphique (rendu GPU / Direct2D) : l'aperçu se recycle ensuite
+        self.video_used |= k == Kind::Video || k == Kind::Pdf;
         let meta = std::fs::metadata(&path).ok();
         let ps = path.to_string_lossy().to_string();
         let restore = self.s.positions.get(&ps).copied();
@@ -853,6 +862,29 @@ impl App {
                 self.s.positions_used.remove(&k);
             }
         }
+    }
+
+    /// À chaque trame : si les réglages ont changé, écriture différée sur un fil ; une erreur
+    /// d'écriture s'affiche en toast rouge. Jamais pour l'aperçu ni en test.
+    fn autosave(&mut self, ctx: &egui::Context) {
+        if self.preview_only || crate::discret() {
+            return;
+        }
+        if self.s != self.saved {
+            self.saved = self.s.clone();
+            self.saver.touch();
+        }
+        if let Some(d) = self.saver.tick(crate::APP, &self.s) {
+            ctx.request_repaint_after(d);
+        }
+        if let Some(e) = self.saver.take_error() {
+            self.toasts.error(format!("Réglages non enregistrés : {e}"));
+        }
+    }
+
+    /// Attend la fin d'une écriture en cours (avant l'enregistrement final à la fermeture).
+    pub fn settings_flush(&mut self) {
+        let _ = self.saver.flush(crate::APP, &self.s);
     }
 
     pub fn save_state(&mut self) -> Settings {
