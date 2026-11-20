@@ -1,102 +1,12 @@
-//! Intégration Windows : boîte « Ouvrir », instance unique (tube nommé),
-//! inscription dans « Ouvrir avec ».
+//! Intégration Windows : boîte « Ouvrir », inscription dans « Ouvrir avec ».
+//! (L'instance unique est dans le socle : `socle::instance`.)
 
-use std::io::{Read, Write};
 use std::path::PathBuf;
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
-use windows::Win32::Storage::FileSystem::{PIPE_ACCESS_INBOUND, ReadFile};
 use windows::Win32::System::Com::*;
-use windows::Win32::System::Pipes::*;
 use windows::Win32::System::Registry::*;
 use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
 use windows::Win32::UI::Shell::*;
 use windows::core::*;
-
-const PIPE: &str = r"\\.\pipe\lecteur-universel-v1";
-/// Instance d'aperçu, séparée de la fenêtre de travail normale
-const PIPE_APERCU: &str = r"\\.\pipe\lecteur-universel-apercu-v1";
-
-/// Nom du tube ; en mode discret (tests), un tube factice qui ne touche jamais au vrai lecteur.
-fn pipe(preview: bool) -> String {
-    let base = if preview { PIPE_APERCU } else { PIPE };
-    if crate::discret() { format!("{base}-test{}", std::env::var("LECTEUR_TUBE").unwrap_or_default()) } else { base.to_string() }
-}
-
-/// Si une instance tourne déjà, lui envoie les fichiers et renvoie vrai.
-/// Protocole (UTF-8, une ligne par chemin) : une ligne « \x02 » demande l'aperçu rapide,
-/// un message « \x01 » seul ramène simplement la fenêtre au premier plan.
-pub fn forward_to_running(paths: &[PathBuf], preview: bool) -> bool {
-    match std::fs::OpenOptions::new().write(true).open(pipe(preview)) {
-        Ok(mut f) => {
-            // Ce processus, lancé par la fenêtre au premier plan (l'explorateur), a le droit de prendre
-            // le focus : il le cède à l'instance qui va s'afficher, sinon Windows la laisse derrière
-            // et Échap partirait à l'explorateur.
-            unsafe {
-                let _ = windows::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(u32::MAX);
-            }
-            let mut s: Vec<String> = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
-            if preview && !s.is_empty() {
-                s.insert(0, "\u{2}".into());
-            }
-            let msg = if s.is_empty() { "\u{1}".to_string() } else { s.join("\n") };
-            let _ = f.write_all(msg.as_bytes());
-            true
-        }
-        Err(_) => false,
-    }
-}
-
-/// Ferme l'aperçu en cours (message « \x03 » sur le tube d'aperçu). Vrai si une instance l'a reçu.
-pub fn close_preview() -> bool {
-    match std::fs::OpenOptions::new().write(true).open(pipe(true)) {
-        Ok(mut f) => f.write_all("\u{3}".as_bytes()).is_ok(),
-        Err(_) => false,
-    }
-}
-
-/// Serveur : chaque message reçu est passé à `on_msg` (chemins, vide = « au premier plan » ;
-/// aperçu ? ; fermer l'aperçu ?).
-pub fn serve(preview_instance: bool, on_msg: impl Fn(Vec<PathBuf>, bool, bool) + Send + 'static) {
-    std::thread::spawn(move || {
-        let name = HSTRING::from(pipe(preview_instance));
-        loop {
-            let h: HANDLE = unsafe {
-                CreateNamedPipeW(&name, PIPE_ACCESS_INBOUND, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, PIPE_UNLIMITED_INSTANCES, 0, 65536, 0, None)
-            };
-            if h.is_invalid() {
-                return;
-            }
-            let connected = unsafe { ConnectNamedPipe(h, None).is_ok() } || std::io::Error::last_os_error().raw_os_error() == Some(535);
-            if connected {
-                let mut data = Vec::new();
-                let mut buf = [0u8; 4096];
-                loop {
-                    let mut n = 0u32;
-                    let ok = unsafe { ReadFile(h, Some(&mut buf), Some(&mut n), None).is_ok() };
-                    if !ok || n == 0 {
-                        break;
-                    }
-                    data.extend_from_slice(&buf[..n as usize]);
-                }
-                let s = String::from_utf8_lossy(&data);
-                let preview = s.split('\n').any(|l| l.trim_end_matches('\r') == "\u{2}");
-                let close = s.split('\n').any(|l| l.trim_end_matches('\r') == "\u{3}");
-                let paths = s
-                    .split('\n')
-                    .map(|l| l.trim_end_matches('\r'))
-                    .filter(|l| !l.is_empty() && *l != "\u{1}" && *l != "\u{2}" && *l != "\u{3}")
-                    .map(PathBuf::from)
-                    .collect();
-                on_msg(paths, preview || preview_instance, close);
-            }
-            unsafe {
-                let _ = DisconnectNamedPipe(h);
-                let _ = CloseHandle(h);
-            }
-        }
-    });
-    let _ = std::io::empty().read(&mut []);
-}
 
 /// Boîte de dialogue « Ouvrir » native (sélection multiple).
 pub fn open_dialog() -> Vec<PathBuf> {
@@ -105,7 +15,7 @@ pub fn open_dialog() -> Vec<PathBuf> {
         let Ok(d): Result<IFileOpenDialog> = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER) else { return out };
         let _ = d.SetOptions(FOS_ALLOWMULTISELECT | FOS_FILEMUSTEXIST);
         let n1 = HSTRING::from("Fichiers pris en charge");
-        let p1 = HSTRING::from(crate::kind::DIALOG_PATTERN);
+        let p1 = HSTRING::from(crate::kind::dialog_pattern());
         let n2 = HSTRING::from("Tous les fichiers");
         let p2 = HSTRING::from("*.*");
         let specs = [
@@ -161,7 +71,7 @@ pub fn register_open_with() -> std::result::Result<usize, String> {
     ok &= set_str(HKEY_CURRENT_USER, r"Software\Classes\Applications\lecteur-universel.exe", Some("FriendlyAppName"), "Lecteur universel");
     ok &= set_str(HKEY_CURRENT_USER, r"Software\Classes\Applications\lecteur-universel.exe\shell\open\command", None, &cmd);
     let mut n = 0;
-    for ext in crate::kind::ALL_EXTS {
+    for ext in crate::kind::all_exts() {
         let e = format!(".{ext}");
         set_str(HKEY_CURRENT_USER, &format!(r"Software\Classes\{e}\OpenWithProgids"), Some(progid), "");
         set_str(HKEY_CURRENT_USER, r"Software\Classes\Applications\lecteur-universel.exe\SupportedTypes", Some(&e), "");

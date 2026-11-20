@@ -51,6 +51,7 @@ Results are saved next to the original (never overwritten) and can be **dragged*
 
 | Key | Action |
 |---|---|
+| Ctrl+K · F1 | command palette (every action, fuzzy search) · all shortcuts |
 | Space / K | play / pause |
 | ← → (Shift: 1 s) · J / L | seek ±5 s · ±10 s |
 | , . | previous / next frame |
@@ -60,7 +61,7 @@ Results are saved next to the original (never overwritten) and can be **dragged*
 | Esc · Space (quick preview) | close the preview opened with `--apercu` (separate instance, ← → open the neighbour file) |
 | C | capture the current video frame |
 | V · G / H | subtitles on/off · subtitle offset −/+ 0.1 s |
-| Ctrl+F · Ctrl+H · Ctrl+G · Ctrl+E | find · replace · go to line · Markdown preview (text, code; Ctrl+F also searches PDFs) |
+| Ctrl+F · Ctrl+H · Ctrl+G · Ctrl+E | find (with autocomplete: Tab completes) · replace · go to line · Markdown preview (text, code; Ctrl+F also searches PDFs) |
 | Speed pill | click: faster · right click: slower · double click: 1× |
 | Tab · F / F11 | clean view · full screen |
 | Ctrl+O · Ctrl+W · Ctrl+Tab | open · close tab · next tab |

@@ -5,7 +5,7 @@ mod clip;
 mod convert;
 mod docx;
 mod editor;
-mod icons;
+pub use socle::icons;
 mod kind;
 mod media;
 mod montage;
@@ -16,7 +16,7 @@ mod testgen;
 mod update;
 mod vidwin;
 mod pdf;
-mod theme;
+pub use socle::theme;
 mod wic;
 mod winx;
 
@@ -109,6 +109,11 @@ impl Runner {
 
         let t_start = Instant::now();
         let mut raw = gfx.egui.take_egui_input(&gfx.window);
+        if std::env::var_os("LECTEUR_EVENTS").is_some() {
+            // Test scripté : la fenêtre invisible n'est jamais active (règle n°0) ; egui la croit
+            // quand même au premier plan pour que les champs gardent le focus clavier.
+            raw.focused = true;
+        }
         // Rejoue les actions de test arrivées à échéance.
         let now_ms = self.started.elapsed().as_millis() as u64;
         while self.script.first().is_some_and(|(t, _)| *t <= now_ms) {
@@ -124,7 +129,7 @@ impl Runner {
                 ["key", k] | ["ctrl", k] | ["shift", k] => {
                     if let Some(key) = egui::Key::from_name(k) {
                         let modifiers = match parts[0] {
-                            "ctrl" => egui::Modifiers::CTRL,
+                            "ctrl" => egui::Modifiers { ctrl: true, command: true, ..Default::default() }, // comme egui-winit sous Windows
                             "shift" => egui::Modifiers::SHIFT,
                             _ => Default::default(),
                         };
@@ -325,14 +330,14 @@ impl ApplicationHandler<UserEvent> for Runner {
             .with_min_inner_size(LogicalSize::new(720.0, 480.0))
             .with_window_icon(window_icon())
             .with_visible(!self.standby);
-        let attrs = if discret() {
-            use winit::platform::windows::WindowAttributesExtWindows;
-            attrs.with_position(winit::dpi::PhysicalPosition::new(-32000, -32000)).with_active(false).with_skip_taskbar(true)
-        } else {
-            attrs
-        };
+        // Mode discret (règle n°0) : créée invisible et sans focus, puis rendue transparente
+        // par le socle (opacité 0, traversée par la souris, jamais active, hors barre des tâches).
+        let attrs = if discret() { attrs.with_visible(false).with_active(false) } else { attrs };
         trace("resumed");
         let window = Rc::new(el.create_window(attrs).expect("création de la fenêtre"));
+        if discret() && !self.standby {
+            discret_show(&window);
+        }
         trace("fenêtre créée");
         let context = softbuffer::Context::new(window.clone()).expect("softbuffer");
         let surface = softbuffer::Surface::new(&context, window.clone()).expect("surface");
@@ -365,6 +370,11 @@ impl ApplicationHandler<UserEvent> for Runner {
             }
             a.test_env(&self.ctx);
             a.preview_only = self.launch_preview;
+            if !discret() {
+                if let Some(msg) = socle::crash::pending(APP) {
+                    a.toasts.error(msg);
+                }
+            }
             if !self.launch_preview && !discret() {
                 a.auto_update_check();
             }
@@ -474,13 +484,8 @@ impl ApplicationHandler<UserEvent> for Runner {
                 self.hidden_since = None;
                 if let Some(g) = &self.gfx {
                     if discret() {
-                        // Jamais d'activation en test : la fenêtre (hors écran) apparaît sans voler le focus
-                        if let Some(h) = self.app.as_ref().and_then(|a| a.parent_hwnd) {
-                            use windows::Win32::UI::WindowsAndMessaging::{SW_SHOWNOACTIVATE, ShowWindow};
-                            unsafe {
-                                let _ = ShowWindow(windows::Win32::Foundation::HWND(h as *mut _), SW_SHOWNOACTIVATE);
-                            }
-                        }
+                        // Jamais d'activation en test : la fenêtre apparaît invisible, sans voler le focus
+                        discret_show(&g.window);
                     } else {
                         g.window.set_visible(true);
                     }
@@ -516,10 +521,15 @@ impl ApplicationHandler<UserEvent> for Runner {
                 // Après une vidéo, le pilote graphique reste chargé (≈ 90 Mo que Windows ne rend
                 // pas). On passe la main à une instance de veille neuve et légère, puis on quitte.
                 if let Ok(exe) = std::env::current_exe() {
-                    if std::process::Command::new(exe).arg("--apercu-veille").spawn().is_ok() {
+                    if std::process::Command::new(exe).arg("--apercu-veille").arg(std::process::id().to_string()).spawn().is_ok() {
                         trace("aperçu recyclé (vidéo vue)");
-                        // Sortie immédiate : le démontage de Media Foundation prend plus d'une seconde,
-                        // pendant laquelle ce processus capterait encore l'aperçu suivant.
+                        // Fin immédiate, sans démontage (Media Foundation et le pilote mettent 1 à 2 s) :
+                        // le verrou d'instance unique est libéré tout de suite pour la relève.
+                        // Rien à enregistrer : l'aperçu n'écrit jamais de réglages.
+                        unsafe {
+                            use windows::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
+                            let _ = TerminateProcess(GetCurrentProcess(), 0);
+                        }
                         std::process::exit(0);
                     }
                 }
@@ -601,8 +611,40 @@ fn cli_convert(args: &[String]) -> i32 {
     code
 }
 
+/// Nom de l'app pour le socle : dossier des réglages et du journal de plantage.
+pub const APP: &str = "lecteur-universel";
+
+/// Nom d'instance unique : la fenêtre de travail et l'aperçu ont chacun la leur ; en mode discret
+/// (tests), des noms factices qui ne touchent jamais au vrai lecteur de l'utilisateur.
+fn instance_name(preview: bool) -> String {
+    let base = if preview { "LecteurApercu" } else { "Lecteur" };
+    if discret() { format!("{base}Test{}", std::env::var("LECTEUR_TUBE").unwrap_or_default().replace(['\\', '/', ' '], "_")) } else { base.into() }
+}
+
+/// Affiche une fenêtre de test sans jamais déranger l'utilisateur (`socle::testmode::hide`).
+fn discret_show(w: &Window) {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    if let Ok(h) = w.window_handle() {
+        if let RawWindowHandle::Win32(h) = h.as_raw() {
+            socle::testmode::hide(h.hwnd.get());
+        }
+    }
+}
+
+/// Attend la fin d'un processus (au plus `ms`).
+fn wait_process(pid: u32, ms: u32) {
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject};
+    unsafe {
+        if let Ok(h) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) {
+            let _ = WaitForSingleObject(h, ms);
+            let _ = windows::Win32::Foundation::CloseHandle(h);
+        }
+    }
+}
+
 fn main() {
     let _ = T0.set(Instant::now());
+    socle::crash::install(APP, env!("CARGO_PKG_VERSION"));
     trace(&format!("main pid {}", std::process::id()));
     update::cleanup_old();
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -642,7 +684,7 @@ fn main() {
     }
     // Test du remplacement : lecteur-universel --maj-test <url du zip>
     if args.first().map(|a| a == "--maj-test").unwrap_or(false) && args.len() > 1 {
-        let r = update::Release { version: "9.9.9".into(), url: args[1].clone(), notes: String::new() };
+        let r = update::Release { version: "9.9.9".into(), tag: "v9.9.9".into(), url: args[1].clone(), page: String::new(), notes: String::new() };
         println!("{:?}", update::install(&r, &|_| {}));
         return;
     }
@@ -670,19 +712,40 @@ fn main() {
     if args.first().map(|a| a == "--convert").unwrap_or(false) {
         std::process::exit(cli_convert(&args[1..]));
     }
-    let launch: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).filter(|p| p.exists()).collect();
+    // Chemins absolus : l'instance qui les reçoit n'a pas le même dossier courant.
+    let launch: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).filter(|p| p.exists()).map(|p| std::path::absolute(&p).unwrap_or(p)).collect();
     // --apercu : aperçu rapide (Espace dans l'Explorateur), Échap le referme
     // --fermer-apercu : referme l'aperçu affiché (pour l'explorateur, et pour les tests sans clavier)
     if args.iter().any(|a| a == "--fermer-apercu") {
-        std::process::exit(if winx::close_preview() { 0 } else { 1 });
+        let r = socle::instance::start(&instance_name(true), &["--fermer-apercu".to_string()]);
+        std::process::exit(if matches!(r, socle::instance::Start::Forwarded) { 0 } else { 1 });
     }
+    // --apercu-veille <pid> : instance d'aperçu neuve qui prend le relais de <pid> (recyclage après
+    // une vidéo). Elle attend sa fin pour ne pas lui envoyer ses propres arguments.
     let standby = args.iter().any(|a| a == "--apercu-veille");
+    if standby {
+        if let Some(pid) = args.iter().skip_while(|a| *a != "--apercu-veille").nth(1).and_then(|p| p.parse::<u32>().ok()) {
+            wait_process(pid, 3000);
+        }
+    }
     let launch_preview = (args.iter().any(|a| a == "--apercu") && !launch.is_empty()) || standby;
-    // Instance unique : un 2ᵉ lancement ajoute un onglet dans la fenêtre existante.
+    // Instance unique (socle : mutex + tube nommé) : un 2ᵉ lancement ajoute un onglet dans la
+    // fenêtre existante ; un aperçu va à l'instance d'aperçu, séparée de la fenêtre de travail.
     let test_mode = std::env::var("LECTEUR_SHOT").is_ok() || std::env::var("LECTEUR_SOLO").is_ok();
     let test_mode = test_mode && std::env::var_os("LECTEUR_TUBE").is_none();
-    if !test_mode && !after_update && !standby && winx::forward_to_running(&launch, launch_preview) {
-        return;
+    let mut primary = None;
+    if !test_mode {
+        let mut fwd: Vec<String> = Vec::new();
+        if launch_preview && !standby {
+            fwd.push("--apercu".into());
+        }
+        fwd.extend(launch.iter().map(|p| p.to_string_lossy().into_owned()));
+        match socle::instance::start(&instance_name(launch_preview), &fwd) {
+            socle::instance::Start::Forwarded => return,
+            socle::instance::Start::Primary(i) => primary = Some(i),
+            socle::instance::Start::Alone => {}
+        }
+        trace("instance unique");
     }
     trace("avant MFStartup");
     media::init_main();
@@ -695,9 +758,12 @@ fn main() {
         let _ = p2.send_event(UserEvent::RepaintAt(Instant::now() + info.delay));
     });
     let p3 = proxy.clone();
-    if !test_mode {
-        winx::serve(launch_preview, move |paths, preview, close| {
+    if let Some(inst) = primary {
+        inst.listen(move |args| {
             trace("tube : message lu");
+            let close = args.iter().any(|a| a == "--fermer-apercu");
+            let preview = launch_preview || args.iter().any(|a| a == "--apercu");
+            let paths: Vec<PathBuf> = args.iter().filter(|a| !a.starts_with("--")).map(PathBuf::from).collect();
             let _ = p3.send_event(if close { UserEvent::ClosePreview } else { UserEvent::Open(paths, preview) });
         });
     }

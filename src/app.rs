@@ -8,6 +8,8 @@ use crate::winx;
 
 #[path = "app_ui.rs"]
 mod ui;
+#[path = "commands.rs"]
+mod commands;
 
 use egui::{
     Align, Align2, Color32, ColorImage, CornerRadius, FontFamily, FontId, Frame, Key, Layout, Margin, Pos2, Rect, RichText, Sense, Stroke,
@@ -37,21 +39,19 @@ pub struct Settings {
     pub no_auto_update: bool,
     /// Dernière vérification (secondes Unix)
     pub last_update_check: u64,
+    /// Commandes récentes de la palette Ctrl+K (en tête de liste)
+    pub palette_recent: Vec<String>,
+    /// Recherches récentes (autocomplétion des champs Ctrl+F)
+    pub search_history: socle::autocomplete::History,
 }
 
 impl Settings {
-    fn file() -> Option<PathBuf> {
-        std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("lecteur-universel").join("settings.json"))
-    }
     pub fn load() -> Settings {
-        Self::file().and_then(|f| std::fs::read(f).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+        socle::settings::load(crate::APP)
     }
     pub fn save(&self) {
-        if let Some(f) = Self::file() {
-            let _ = std::fs::create_dir_all(f.parent().unwrap());
-            if let Ok(b) = serde_json::to_vec_pretty(self) {
-                let _ = std::fs::write(f, b);
-            }
+        if !crate::discret() {
+            let _ = socle::settings::save(crate::APP, self);
         }
     }
 }
@@ -166,6 +166,8 @@ struct PdfV {
     find: String,
     find_hit: usize,
     focus_find: bool,
+    /// Autocomplétion du champ de recherche
+    sac: crate::editor::SearchAc,
 }
 
 struct MedV {
@@ -267,7 +269,8 @@ pub struct App {
     batch: bool,
     job: Option<Job>,
     last_out: Vec<PathBuf>,
-    toast: Option<(String, bool, Instant)>,
+    /// Messages éphémères (socle) : dans la barre d'état, ou en bulle en vue épurée
+    pub(crate) toasts: socle::ui::Toasts,
     pub drag_out: Option<Vec<PathBuf>>,
     pub drop_hover: bool,
     wake: Arc<dyn Fn() + Send + Sync>,
@@ -294,6 +297,9 @@ pub struct App {
     pub want_exit: bool,
     /// Aperçu rapide en cours (Espace dans l'Explorateur) : Échap le referme
     preview: Option<Preview>,
+    /// Palette de commandes Ctrl+K et aide F1 (socle)
+    palette: socle::ui::Palette,
+    help_open: bool,
     /// Instance dédiée à l'aperçu (lancée par --apercu) : un seul fichier à la fois
     pub preview_only: bool,
     /// Une vidéo a été ouverte : le pilote graphique est chargé dans le processus (≈ 90 Mo
@@ -334,7 +340,7 @@ impl App {
             batch: false,
             job: None,
             last_out: Vec::new(),
-            toast: None,
+            toasts: socle::ui::Toasts::default(),
             drag_out: None,
             drop_hover: false,
             wake: Arc::new(move || c2.request_repaint()),
@@ -352,6 +358,8 @@ impl App {
             upd_installing: false,
             want_exit: false,
             preview: None,
+            palette: { let mut pl = socle::ui::Palette::default(); pl.recent = s.palette_recent.clone(); pl },
+            help_open: false,
             preview_only: false,
             video_used: false,
             want_hide: false,
@@ -479,7 +487,11 @@ impl App {
     }
 
     fn say(&mut self, msg: impl Into<String>, err: bool) {
-        self.toast = Some((msg.into(), err, Instant::now()));
+        if err {
+            self.toasts.error(msg);
+        } else {
+            self.toasts.ok(msg);
+        }
     }
 
     // ---------- Ouverture ----------
@@ -682,6 +694,7 @@ impl App {
                     find: String::new(),
                     find_hit: 0,
                     focus_find: false,
+                    sac: Default::default(),
                 }))
             }
             Kind::Docx => match docx::parse(&ps) {
@@ -998,7 +1011,7 @@ impl App {
                                 Ok(t) => v.texts = Some(t),
                                 Err(e) => {
                                     v.texts = Some(Vec::new());
-                                    self.toast = Some((e, true, Instant::now()));
+                                    self.toasts.error(e);
                                 }
                             }
                         }
@@ -1045,6 +1058,14 @@ impl App {
     }
 
     fn keys(&mut self, ctx: &egui::Context) {
+        // Ctrl+K : palette de commandes ; F1 : tous les raccourcis. Ouvertes, elles gardent le clavier.
+        self.palette.handle_shortcut(ctx);
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::F1)) {
+            self.help_open = !self.help_open;
+        }
+        if self.palette.is_open() || self.help_open {
+            return;
+        }
         let typing = ctx.egui_wants_keyboard_input();
         let (ctrl, shift) = ctx.input(|i| (i.modifiers.ctrl, i.modifiers.shift));
         let pressed = |k: Key| ctx.input(|i| i.key_pressed(k));
@@ -1389,7 +1410,7 @@ impl App {
     fn edit_image(&mut self, what: &str) {
         let Some(View::Image(v)) = self.tabs.get_mut(self.active).map(|t| &mut t.view) else { return };
         if !v.full {
-            self.toast = Some(("Image encore en chargement…".into(), true, Instant::now()));
+            self.toasts.info("Image encore en chargement…");
             return;
         }
         v.disp = None;

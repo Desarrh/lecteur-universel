@@ -1,52 +1,25 @@
-//! Décodage d'images par Windows (WIC) : HEIC/HEIF (photos iPhone), AVIF, JPEG XR,
-//! RAW d'appareils photo, DDS… — tout ce que Windows sait lire, sans rien embarquer.
+//! Images : décodage complet par le socle ; ici, l'aperçu réduit rapide par Windows (WIC)
+//! et l'encodeur HEIC (fichiers de test).
 
 use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
 use windows::Win32::Graphics::Imaging::*;
 use windows::Win32::System::Com::*;
 use windows::core::HSTRING;
 
-/// Formats confiés à Windows (la crate `image` ne les lit pas).
-pub const EXTS: &[&str] = &["heic", "heif", "avif", "jxr", "wdp", "hdp", "dds", "dng", "cr2", "cr3", "nef", "nrw", "arw", "raf", "orf", "rw2", "pef", "srw"];
-
-pub fn decode(path: &str) -> Result<image::RgbaImage, String> {
-    unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        let f: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).map_err(|e| e.message().to_string())?;
-        let dec = f.CreateDecoderFromFilename(&HSTRING::from(path), None, GENERIC_READ, WICDecodeMetadataCacheOnDemand).map_err(|_| missing_codec(path))?;
-        let frame = dec.GetFrame(0).map_err(|e| e.message().to_string())?;
-        let conv = f.CreateFormatConverter().map_err(|e| e.message().to_string())?;
-        conv.Initialize(&frame, &GUID_WICPixelFormat32bppRGBA, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeCustom).map_err(|e| e.message().to_string())?;
-        let (mut w, mut h) = (0u32, 0u32);
-        conv.GetSize(&mut w, &mut h).map_err(|e| e.message().to_string())?;
-        let mut buf = vec![0u8; (w * h * 4) as usize];
-        conv.CopyPixels(std::ptr::null(), w * 4, &mut buf).map_err(|e| e.message().to_string())?;
-        image::RgbaImage::from_raw(w, h, buf).ok_or_else(|| "image vide".to_string())
-    }
-}
-
-fn missing_codec(path: &str) -> String {
-    let e = path.rsplit('.').next().unwrap_or("").to_lowercase();
-    match e.as_str() {
-        "heic" | "heif" => "Format HEIC : installez « Extensions d'image HEIF » (et « Extensions vidéo HEVC ») depuis le Microsoft Store.".into(),
-        "avif" => "Format AVIF : installez « Extension vidéo AV1 » depuis le Microsoft Store.".into(),
-        "dng" | "cr2" | "cr3" | "nef" | "nrw" | "arw" | "raf" | "orf" | "rw2" | "pef" | "srw" => "Photo RAW : installez « Extension d'image brute » depuis le Microsoft Store.".into(),
-        _ => "Windows ne sait pas décoder ce format.".into(),
-    }
-}
-
-/// `image` d'abord (rapide, sans COM), Windows ensuite.
+/// Décode n'importe quelle image lisible par le socle : `image` d'abord, puis PSD, RAW, SVG, EXR,
+/// JXL en Rust, et WIC (HEIC, AVIF, JXR…) en repli, avec un message clair s'il manque une extension.
 pub fn open_any(path: &std::path::Path) -> Result<image::RgbaImage, String> {
-    let ext = crate::kind::ext(path);
-    if !EXTS.contains(&ext.as_str()) {
-        let r = image::ImageReader::open(path).map_err(|e| e.to_string()).and_then(|r| r.with_guessed_format().map_err(|e| e.to_string())).and_then(|r| r.decode().map_err(|e| e.to_string()));
-        match r {
-            Ok(i) => return Ok(i.to_rgba8()),
-            Err(e) if !path.exists() => return Err(e),
-            Err(_) => {}
-        }
-    }
-    decode(&path.to_string_lossy())
+    socle::images::decode(path, &socle::Cancel::new()).or_else(|e| by_extension(path).ok_or(e))
+}
+
+/// Secours : format donné par l'extension (un TGA non compressé commence comme un curseur .cur,
+/// que la détection par en-tête du socle prend pour une icône).
+fn by_extension(path: &std::path::Path) -> Option<image::RgbaImage> {
+    let fmt = image::ImageFormat::from_path(path).ok()?;
+    let r = image::ImageReader::open(path).ok()?;
+    let mut r = r;
+    r.set_format(fmt);
+    r.decode().ok().map(|i| i.to_rgba8())
 }
 
 /// Encode en HEIC avec l'encodeur de Windows (extension HEIF requise) — sert aux fichiers de test.

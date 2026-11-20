@@ -112,6 +112,7 @@ impl App {
             painter.text(r.center(), Align2::CENTER_CENTER, "Lâchez pour ouvrir", FontId::proportional(26.0), p.text);
         }
         self.draw_toast(&ctx);
+        self.draw_palette(&ctx);
     }
 
     // ---------- Barre d'onglets ----------
@@ -334,8 +335,13 @@ impl App {
             ui.horizontal_centered(|ui| {
                 let job = self.job.as_ref().map(|j| (j.label.clone(), f32::from_bits(j.progress.load(Ordering::Relaxed))));
                 let right_w = if job.is_some() { 260.0 } else if win_w > 1100.0 { 430.0 } else { 0.0 };
-                let g = elided(ui, &info.unwrap_or_else(|| "Prêt".into()), FontId::monospace(11.5), p.muted, ui.available_width() - right_w - 10.0);
-                ui.label(g);
+                if self.toasts.current().is_some() {
+                    // message éphémère du socle à la place des infos du fichier
+                    self.toasts.ui(ui, &p);
+                } else {
+                    let g = elided(ui, &info.unwrap_or_else(|| "Prêt".into()), FontId::monospace(11.5), p.muted, ui.available_width() - right_w - 10.0);
+                    ui.label(g);
+                }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if let Some((label, f)) = job {
                         ui.add(egui::ProgressBar::new(f).desired_width(120.0).desired_height(10.0).fill(p.accent));
@@ -427,9 +433,9 @@ impl App {
                 ui.centered_and_justified(|ui| ui.label(RichText::new(e.as_str()).size(16.0).color(p.muted)));
             }
             View::Image(v) => draw_image(ui, v, &p),
-            View::Text(v) => draw_text(ui, v, &p),
+            View::Text(v) => draw_text(ui, v, &p, &mut self.s.search_history),
             View::Docx(b) => draw_docx(ui, b, &p),
-            View::Pdf(v) => draw_pdf(ui, v, &p),
+            View::Pdf(v) => draw_pdf(ui, v, &p, &mut self.s.search_history),
             View::Media(m) => {
                 let playing = m.p.as_ref().map(|x| x.playing()).unwrap_or(false);
                 let show = controls || !playing || kind == Kind::Audio;
@@ -514,30 +520,20 @@ impl App {
         }
     }
 
+    /// En vue épurée (pas de barre d'état), le toast du socle s'affiche dans une bulle en bas.
     fn draw_toast(&mut self, ctx: &egui::Context) {
-        let p = self.pal;
-        let Some((msg, err, at)) = &self.toast else { return };
-        if at.elapsed().as_secs_f32() > 5.0 {
-            self.toast = None;
+        if self.panels || self.toasts.current().is_none() {
             return;
         }
-        ctx.request_repaint_after(std::time::Duration::from_millis(300));
-        let r = ctx.content_rect();
+        let p = self.pal;
         let toast = egui::Area::new(egui::Id::unique("toast")).anchor(Align2::CENTER_BOTTOM, vec2(0.0, -44.0)).order(egui::Order::Tooltip).show(ctx, |ui| {
             Frame::new()
-                .fill(if *err { p.del_bg } else { p.add_bg })
-                .stroke(Stroke::new(1.0, if *err { p.del } else { p.add }))
+                .fill(p.surface)
+                .stroke(Stroke::new(1.0, p.border))
                 .corner_radius(CornerRadius::same(10))
-                .inner_margin(Margin::symmetric(16, 10))
+                .inner_margin(Margin::symmetric(14, 8))
                 .shadow(egui::Shadow { offset: [0, 4], blur: 14, spread: 0, color: Color32::from_black_alpha(50) })
-                .show(ui, |ui| {
-                    ui.set_max_width((r.width() * 0.6).min(620.0));
-                    ui.horizontal(|ui| {
-                        let (ir, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
-                        icons::paint(ui.painter(), ir, if *err { Icon::Close } else { Icon::Check }, if *err { p.del } else { p.add });
-                        ui.add(egui::Label::new(RichText::new(msg.as_str()).color(if *err { p.del } else { p.add })).wrap());
-                    });
-                });
+                .show(ui, |ui| self.toasts.ui(ui, &p));
         });
         self.occl.push(toast.response.rect);
     }
@@ -1209,9 +1205,9 @@ fn draw_image(ui: &mut Ui, v: &mut ImgV, p: &Palette) {
     });
 }
 
-fn draw_text(ui: &mut Ui, v: &mut TxtV, p: &Palette) {
+fn draw_text(ui: &mut Ui, v: &mut TxtV, p: &Palette, hist: &mut socle::autocomplete::History) {
     let TxtV { text, lang, wrap, ed, truncated, .. } = v;
-    crate::editor::show(ui, text, lang, wrap, ed, *truncated, p);
+    crate::editor::show(ui, text, lang, wrap, ed, *truncated, p, hist);
 }
 
 fn draw_docx(ui: &mut Ui, blocks: &[Block], p: &Palette) {
@@ -1309,7 +1305,7 @@ fn draw_docx(ui: &mut Ui, blocks: &[Block], p: &Palette) {
     });
 }
 
-fn draw_pdf(ui: &mut Ui, v: &mut PdfV, p: &Palette) {
+fn draw_pdf(ui: &mut Ui, v: &mut PdfV, p: &Palette, hist: &mut socle::autocomplete::History) {
     if let Some(e) = &v.err {
         if v.pages == 0 {
             ui.centered_and_justified(|ui| ui.label(RichText::new(e.as_str()).color(p.del)));
@@ -1343,18 +1339,24 @@ fn draw_pdf(ui: &mut Ui, v: &mut PdfV, p: &Palette) {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                let r = ui.add(egui::TextEdit::singleline(&mut v.find).hint_text("Rechercher dans le PDF").desired_width(260.0).id(egui::Id::unique("pdf_find")));
+                // Mots du PDF proposés dès qu'ils sont extraits (index construit dans un fil)
+                if let Some(t) = v.texts.as_ref().filter(|_| !v.sac.is_built()) {
+                    v.sac.index(&t.join("\n"), hist);
+                }
+                let ar = v.sac.field(ui, p, egui::Id::unique("pdf_find"), &mut v.find, "Rechercher dans le PDF", 260.0, hist);
+                let r = ar.response.clone();
+                ui.add_space(26.0); // le cadre du champ déborde à droite de sa zone
                 if v.focus_find {
                     r.request_focus();
                     v.focus_find = false;
                 }
                 let lk = Look { fg: p.text, bg: Color32::TRANSPARENT, hover: p.hover_bg, round: false };
                 let mut go = 0i32;
-                if r.changed() {
+                if r.changed() || ar.completed {
                     v.find_hit = 0;
                     go = 2;
                 }
-                if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                if ar.submitted.is_some() {
                     go = if ui.input(|i| i.modifiers.shift) { -1 } else { 1 };
                     v.focus_find = true;
                 }

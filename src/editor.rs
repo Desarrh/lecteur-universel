@@ -6,6 +6,76 @@ use crate::theme::Palette;
 use egui::text::{CCursor, CCursorRange, LayoutJob};
 use egui::{Align, Color32, CornerRadius, FontFamily, FontId, Frame, Key, Margin, Modifiers, Rect, RichText, Stroke, TextFormat, Ui, pos2, vec2};
 
+use socle::autocomplete::{Autocomplete, History};
+use std::sync::mpsc::Receiver;
+
+/// Autocomplétion d'un champ de recherche (socle) : les mots du document, indexés dans un fil
+/// à l'ouverture de la recherche, plus les recherches récentes (communes à tous les fichiers).
+#[derive(Default)]
+pub struct SearchAc {
+    ac: Autocomplete,
+    field: socle::ui::AutoField,
+    rx: Option<Receiver<Vec<String>>>,
+    built: bool,
+}
+
+impl SearchAc {
+    /// Indexe (une fois) les mots de `text` dans un fil ; l'interface ne l'attend jamais.
+    pub fn index(&mut self, text: &str, hist: &History) {
+        if self.built {
+            return;
+        }
+        self.built = true;
+        self.ac.history = hist.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let t = text.to_owned();
+        std::thread::spawn(move || {
+            let _ = tx.send(words(&t));
+        });
+        self.rx = Some(rx);
+    }
+
+    pub fn is_built(&self) -> bool {
+        self.built
+    }
+
+    /// À refaire la prochaine fois (le document a pu changer).
+    pub fn reset(&mut self) {
+        self.built = false;
+    }
+
+    /// Champ de recherche avec suggestions. Une recherche validée (Entrée) entre dans l'historique.
+    #[allow(clippy::too_many_arguments)]
+    pub fn field(&mut self, ui: &mut Ui, p: &Palette, id: egui::Id, text: &mut String, hint: &str, width: f32, hist: &mut History) -> socle::ui::AutoResponse {
+        if let Some(rx) = &self.rx {
+            if let Ok(w) = rx.try_recv() {
+                self.ac.set_candidates(w);
+                self.rx = None;
+            }
+        }
+        let r = socle::ui::autocomplete_field(ui, p, id, &mut self.field, &self.ac, text, hint, width);
+        if let Some(s) = r.submitted.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            hist.record(s);
+            self.ac.history.record(s);
+        }
+        r
+    }
+}
+
+/// Mots distincts d'un texte (3 lettres ou plus), les plus fréquents d'abord, au plus 20 000.
+pub fn words(text: &str) -> Vec<String> {
+    let mut count: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
+    for w in text.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-' || c == '\'')) {
+        let w = w.trim_matches(|c: char| c == '-' || c == '\'');
+        if w.chars().count() >= 3 && w.len() <= 48 {
+            *count.entry(w).or_default() += 1;
+        }
+    }
+    let mut v: Vec<(&str, u32)> = count.into_iter().collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    v.into_iter().take(20_000).map(|(w, _)| w.to_string()).collect()
+}
+
 #[derive(Default)]
 pub struct EditState {
     pub find_open: bool,
@@ -23,6 +93,8 @@ pub struct EditState {
     focus_editor: bool,
     /// Sélection à appliquer (plage en caractères) et à faire défiler jusqu'à elle.
     jump: Option<(usize, usize)>,
+    /// Autocomplétion du champ « Rechercher »
+    sac: SearchAc,
 }
 
 /// Occurrences de `needle` dans `hay`, en indices de caractères (au plus 20 000).
@@ -76,7 +148,8 @@ fn line_start(s: &str, line: usize) -> usize {
 
 /// Barre d'outils + éditeur. Renvoie vrai si le texte a été modifié par un remplacement.
 #[allow(clippy::too_many_arguments)]
-pub fn show(ui: &mut Ui, text: &mut String, lang: &str, wrap: &mut bool, st: &mut EditState, read_only: bool, p: &Palette) {
+#[allow(clippy::too_many_arguments)]
+pub fn show(ui: &mut Ui, text: &mut String, lang: &str, wrap: &mut bool, st: &mut EditState, read_only: bool, p: &Palette, hist: &mut History) {
     let id = egui::Id::unique("editor");
     let is_md = matches!(lang, "md" | "markdown");
     // Raccourcis (même quand l'éditeur a le focus)
@@ -95,6 +168,9 @@ pub fn show(ui: &mut Ui, text: &mut String, lang: &str, wrap: &mut bool, st: &mu
         text.chars().skip(a).take(b - a).collect::<String>()
     });
     if f || h {
+        if !st.find_open {
+            st.sac.reset();
+        }
         st.find_open = true;
         st.replace_open = h || st.replace_open;
         st.focus_find = true;
@@ -135,7 +211,11 @@ pub fn show(ui: &mut Ui, text: &mut String, lang: &str, wrap: &mut bool, st: &mu
                     st.focus_find = true;
                 }
             } else {
-                let r = ui.add(egui::TextEdit::singleline(&mut st.find).hint_text("Rechercher").desired_width(240.0).id(egui::Id::unique("find_field")));
+                st.sac.index(text, hist);
+                let fid = egui::Id::unique("find_field");
+                let ar = st.sac.field(ui, p, fid, &mut st.find, "Rechercher", 240.0, hist);
+                let r = ar.response.clone();
+                ui.add_space(26.0); // le cadre du champ déborde à droite de sa zone
                 if st.focus_find {
                     r.request_focus();
                     st.focus_find = false;
@@ -146,7 +226,13 @@ pub fn show(ui: &mut Ui, text: &mut String, lang: &str, wrap: &mut bool, st: &mu
                         st.jump = Some(*h0);
                     }
                 }
-                let enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                if ar.completed {
+                    st.hit = 0;
+                    if let Some(h0) = find_all(text, &st.find, st.case).first() {
+                        st.jump = Some(*h0);
+                    }
+                }
+                let enter = ar.submitted.is_some();
                 let shift = ui.input(|i| i.modifiers.shift);
                 let count = if st.find.is_empty() { String::new() } else if hits.is_empty() { "aucun résultat".into() } else { format!("{} / {}", st.hit + 1, hits.len()) };
                 ui.label(RichText::new(count).size(12.0).color(if hits.is_empty() && !st.find.is_empty() { p.del } else { p.muted }));

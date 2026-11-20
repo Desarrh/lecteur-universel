@@ -25,23 +25,23 @@ Historique : l'étude initiale (choix des API, compromis) est dans [ETUDE-STACK.
 | Vidéo | Media Foundation `IMFMediaEngine` qui dessine **directement sur le GPU dans une sous-fenêtre** (`vidwin.rs`). Replis : décodage DXVA par D3D11 avec relecture CPU, puis décodage logiciel avec bitmap WIC |
 | Montage et conversion audio/vidéo | Media Foundation : Source Reader et Sink Writer, encodeurs H.264, AAC, MP3 et WMA de Windows |
 | PDF | Affichage : `Windows.Data.Pdf` (WinRT). Texte : `lopdf` 0.47. Écriture : générateur maison (`pdfgen.rs`, `flate2`) |
-| Images | `image` 0.25.10 (png, jpeg, gif, webp, bmp, ico, tiff), `webp` 0.3 (WebP avec perte), `gif` 0.14 (GIF optimisés). **WIC** pour HEIC, AVIF, JPEG XR, RAW et DDS |
+| Socle | **`socle` v0.1.2** (dépôt `Desarrh/socle`, dépendance git épinglée par tag ; en local `.cargo/config.toml`, non versionné, pointe vers `../socle`). Features : `ui` (thème, icônes, palette Ctrl+K, autocomplétion, toasts), `images` + `img-exr` + `img-svg` + `img-wic`, `settings`, `crash`, `instance`, `update`, `testmode`. **Sans `img-jxl`** (+2,2 Mo) : le JPEG XL passe par WIC (extension « JPEG XL » du Store) |
+| Images | Décodage par `socle::images` : `image` 0.25.10 (png, jpeg, gif, webp, bmp, ico, tiff, tga, dds BC1-3, hdr, qoi), PSD, aperçu RAW, SVG (`resvg`, sans texte), EXR, puis **WIC** en repli (HEIC, AVIF, JPEG XR, JXL, RAW complet, DDS BC7). `webp` 0.3 (WebP avec perte) et `gif` 0.14 (GIF optimisés) pour l'écriture |
 | Word | `zip` 9 et `quick-xml` 0.38 (lecteur maison) ; PowerShell + COM Word seulement si Word est installé, pour un PDF fidèle |
 | Audio | `hound` 3.5 (WAV) |
 | Windows | `windows` 0.62.2 (Win32, WinRT et D3D11 ; features dans `Cargo.toml`), `windows-future` 0.3, `drag` 2.1.1 (glisser vers l'extérieur), `winresource` (icône de l'exe) |
 | Dépendances externes | Aucune à l'exécution. `curl.exe` (fourni avec Windows) sert pour les mises à jour. Les codecs HEVC, AV1, HEIF et RAW viennent des extensions du Microsoft Store |
-| Build | `cargo build --release` produit `target\release\lecteur-universel.exe` (11,9 Mo, lto="thin", strip). Le zip de release est construit dans `dist\` |
+| Build | `cargo build --release` produit `target\release\lecteur-universel.exe` (15,6 Mo depuis le socle, contre 12,0 avant : SVG +1,1 Mo, EXR +0,7 Mo, formats `images` +1,1 Mo, composants `ui` +0,35 Mo ; lto="thin", strip). Le zip de release est construit dans `dist\` |
 
 ## 3. Architecture
 
 | Fichier | Rôle |
 |---|---|
-| `main.rs` | Boucle winit, rendu softbuffer, copie de la vidéo en mode CPU, plein écran, instance unique, modes ligne de commande (`--convert`, `--cut`, `--assembler-pdf`, `--generer-tests`, `--selftest`) et modes de test (`LECTEUR_SHOT`, `LECTEUR_EVENTS`, `LECTEUR_FPS`, `LECTEUR_TRACE=<fichier>` qui journalise les étapes du démarrage en ms) |
+| `main.rs` | Boucle winit, rendu softbuffer, copie de la vidéo en mode CPU, plein écran, instance unique, modes ligne de commande (`--convert`, `--cut`, `--assembler-pdf`, `--generer-tests`, `--selftest`) et modes de test (`LECTEUR_SHOT`, `LECTEUR_EVENTS`, `LECTEUR_FPS`, `LECTEUR_TRACE=<fichier>` qui journalise les étapes du démarrage en ms et le pid). **Mode discret** (règle n°0) : automatique en test, fenêtre invisible et jamais active (`socle::testmode::hide`), son coupé, réglages jamais écrits, pas de vérification de mise à jour, noms d'instance factices (`LECTEUR_TUBE=<suffixe>`) |
 | `app.rs` | État : réglages, onglets et vues (`ImgV`, `TxtV`, `PdfV`, `MedV`), chargement des fichiers, `tick()` (sondage des lecteurs, vignettes, PDF), raccourcis clavier, actions (convertir, couper, capturer, enregistrer), mises à jour, autotest |
-| `app_ui.rs` | Tout le dessin : onglets, barre d'état, accueil, vues image/PDF/Word, **frise de montage**, barre de lecture, panneau Modifier / Convertir / Infos, toasts, vue épurée |
-| `editor.rs` | Éditeur texte/code : recherche et remplacement, aller à la ligne, numéros de ligne alignés sur l'affichage, aperçu Markdown |
-| `icons.rs` | Icônes vectorielles (`enum Icon`, `paint`) et composants `button` / `wide` |
-| `theme.rs` | Palettes clair et sombre, styles egui, polices |
+| `app_ui.rs` | Tout le dessin : onglets, barre d'état, accueil, vues image/PDF/Word, **frise de montage**, barre de lecture, panneau Modifier / Convertir / Infos, toasts (socle, dans la barre d'état ; en bulle en vue épurée), vue épurée |
+| `commands.rs` | Palette **Ctrl+K** et aide **F1** (socle) : liste des commandes selon l'onglet actif (fichier, vue, image, lecture, montage, conversions), exécution par id |
+| `editor.rs` | Éditeur texte/code : recherche et remplacement, aller à la ligne, numéros de ligne alignés sur l'affichage, aperçu Markdown. `SearchAc` : **autocomplétion** des champs de recherche (mots du document indexés dans un fil + recherches récentes, aussi pour le PDF) |
 | `kind.rs` | Type de fichier par extension, couleurs des pastilles, noms de fichier libres, fichiers voisins, formatage des tailles et des durées |
 | `media.rs` | Lecteur Media Foundation (trois modes de rendu), décodage PCM, MP3 (encodeur Windows), coupe MP3 sans réencodage, images vidéo pour les GIF |
 | `montage.rs` | Vignettes de la frise, coupe vidéo sans réencodage (copie des échantillons), réencodage H.264/AAC |
@@ -49,8 +49,8 @@ Historique : l'étude initiale (choix des API, compromis) est dans [ETUDE-STACK.
 | `convert.rs` | **Graphe à pivots** : chaque format d'entrée passe par un pivot (Raster, PCM, Frames, Stream, Doc, Text), puis chaque format de sortie en sort |
 | `pdf.rs` / `pdfgen.rs` | Rendu des pages PDF en arrière-plan, texte des pages ; écriture de PDF (texte, Word, images, mode « document scanné ») |
 | `docx.rs` | Lecture d'un .docx (paragraphes, styles, listes, tableaux, images) et export TXT, MD ou HTML |
-| `subs.rs`, `wic.rs`, `clip.rs` | Sous-titres SRT/VTT ; décodage et encodage WIC ; image vers le presse-papiers (DIB) |
-| `winx.rs`, `update.rs` | Boîte « Ouvrir », instance unique par tube nommé, inscription « Ouvrir avec » ; mise à jour depuis GitHub |
+| `subs.rs`, `wic.rs`, `clip.rs` | Sous-titres SRT/VTT ; `open_any` (socle, avec repli par l'extension), aperçu réduit rapide par WIC, encodeur HEIC ; image vers le presse-papiers (DIB) |
+| `winx.rs`, `update.rs` | Boîte « Ouvrir », inscription « Ouvrir avec » ; mise à jour depuis GitHub par `socle::update` (thème, icônes, instance unique, réglages et plantages viennent aussi du socle) |
 | `smtc.rs` | Panneau multimédia de Windows et touches multimédia (repris de Tube), créé au premier son ou vidéo |
 | `testgen.rs` | Génère le dossier `tests/` (tous les formats, plus une vidéo synthétique à la résolution de l'écran) |
 
@@ -162,7 +162,8 @@ Toutes les valeurs ci-dessous sont définies dans **`src/theme.rs`**, sauf menti
 | Échap · Espace · ← → (aperçu) | ferment l'aperçu rapide ouvert par `--apercu` · fichier voisin |
 | C | capture vidéo |
 | V · G / H | sous-titres · décalage des sous-titres |
-| Ctrl+F / H / G / E | rechercher / remplacer / aller à la ligne / aperçu Markdown (Ctrl+F marche aussi dans les PDF) |
+| Ctrl+K · F1 | palette de commandes · tous les raccourcis |
+| Ctrl+F / H / G / E | rechercher (avec autocomplétion : Tab complète, ↑↓ choisit) / remplacer / aller à la ligne / aperçu Markdown (Ctrl+F marche aussi dans les PDF) |
 | Ctrl+S / Ctrl+Maj+S | **texte** : enregistrer le fichier / enregistrer une copie — **image** : copie / remplacer |
 | R / Maj+R · Ctrl+Z | pivoter · annuler (image) |
 
@@ -187,9 +188,10 @@ Toutes les valeurs ci-dessous sont définies dans **`src/theme.rs`**, sauf menti
 **Lancement**
 - `lecteur-universel.exe [fichiers…]`.
 - Avec un argument (cas d'« Ouvrir avec ») : vue épurée.
-- **Instance unique** par le tube nommé `\\.\pipe\lecteur-universel-v1` : un deuxième lancement transmet ses fichiers à la fenêtre ouverte, qui les ouvre en onglets.
-- **Aperçu rapide** : `lecteur-universel.exe --apercu <fichier>`. C'est une **instance séparée** de la fenêtre de travail (tube `\\.\pipe\lecteur-universel-apercu-v1`), qui ne touche ni aux onglets ni aux réglages de l'utilisateur. Vue épurée, un fichier à la fois ; ← → ou PgPréc / PgSuiv ouvrent le fichier voisin (J / L avancent dans une vidéo, K lance la lecture). Échap, Espace ou la croix **cachent** la fenêtre ; l'instance reste en veille (CPU 0, pas de sondage) et quitte seule après 10 min sans aperçu. Après une vidéo, le pilote graphique reste chargé dans le processus (≈ 90 Mo que Windows ne rend pas) : en se cachant, l'aperçu lance une instance de veille neuve (`--apercu-veille`, fenêtre cachée, une image dessinée à vide pour être déjà chaude) puis quitte. Veille ≈ 20 à 40 Mo réservés, quelques Mo réellement utilisés.
-- **Protocole des tubes** (pour écrire directement sans lancer de processus) : texte UTF-8, un chemin par ligne (`\n`). Sur le tube d'aperçu, tout message est un aperçu. Sur le tube principal, une ligne contenant le seul caractère `\x02` demande un aperçu dans la fenêtre de travail, et un message `\x01` seul la ramène au premier plan. Si le tube n'existe pas, lancer l'exe.
+- **Instance unique** par `socle::instance` (mutex + tube nommé) sous le nom « Lecteur » : un deuxième lancement transmet ses fichiers (chemins absolus) à la fenêtre ouverte, qui les ouvre en onglets.
+- **Aperçu rapide** : `lecteur-universel.exe --apercu <fichier>`. **Instance séparée** de la fenêtre de travail (nom « LecteurApercu »), qui ne touche ni aux onglets ni aux réglages de l'utilisateur. Vue épurée, un fichier à la fois ; ← → ou PgPréc / PgSuiv ouvrent le fichier voisin (J / L avancent dans une vidéo, K lance la lecture). Échap, Espace ou la croix **cachent** la fenêtre ; l'instance reste en veille (CPU 0, pas de sondage) et quitte seule après 10 min sans aperçu. `--fermer-apercu` referme l'aperçu affiché. Après une vidéo, le pilote graphique reste chargé dans le processus (≈ 90 Mo que Windows ne rend pas) : en se cachant, l'aperçu lance une instance de veille neuve (`--apercu-veille <pid>`, fenêtre cachée, une image dessinée à vide pour être déjà chaude ; elle attend la fin de `<pid>`), puis se termine net (`TerminateProcess`, sinon le démontage de Media Foundation garde 1 à 2 s le verrou d'instance).
+- **Protocole** (si un programme veut écrire directement) : tube `\\.\pipe\<Nom>-<USERNAME>-socle-v1`, message UTF-8 `SOCLE1` puis chaque argument précédé de `\0` (ex. `SOCLE1\0--apercu\0C:\chemin\photo.jpg`). Le plus simple reste de lancer l'exe : il transmet en moins d'1 ms.
+- **Mesures** (release, mode discret, machine calme) : aperçu à froid 66 à 80 ms de l'appui à la 1re image ; à chaud 40 à 100 ms (11 à 30 ms du tube à l'image) ; aperçu suivant une vidéo 70 à 100 ms. Veille : 26 à 27 Mo réservés, moins de 1 Mo réellement utilisé, CPU 0.
 - Menu ⋯ › « Ajouter à "Ouvrir avec" » : écrit dans HKCU (ProgID `LecteurUniversel.Fichier`).
 
 **Installation et mise à jour**
@@ -257,9 +259,10 @@ Toutes les valeurs ci-dessous sont définies dans **`src/theme.rs`**, sauf menti
 - **Sous-titres** : seulement les fichiers externes ; les pistes intégrées aux MKV et MP4 sont ignorées.
 - **Mode GPU direct** : la capture redécode depuis le fichier (environ 100 ms), et les éléments posés sur la vidéo doivent être déclarés comme zones à découper (`occl`).
 - **Fichiers volumineux** : un fichier texte de plus de 8 Mo est tronqué et passe en lecture seule. Les textures des GIF animés sont limitées à 200 Mo.
+- **Socle v0.1.2** : un TGA non compressé est pris pour un curseur (en-tête `00 00 02 00`) → le lecteur retente par l'extension ; un DDS non compressé n'est pas renvoyé vers WIC (« format DDS non pris en charge »). Signalés au socle.
 - **Dette**
-  - `app_ui.rs` (1 876 lignes) et `app.rs` (1 400) sont gros ; le dessin des vues mériterait un fichier par type.
-  - Thème, icônes et vidwin sont **dupliqués** entre explorateur, lecteur et Tube.
+  - `app_ui.rs` (1 900 lignes) et `app.rs` (1 450) sont gros ; le dessin des vues mériterait un fichier par type.
+  - `vidwin` et `smtc` restent copiés entre le lecteur et Tube (candidats pour le socle).
   - Le code contient des modes de test (`LECTEUR_*`) ; sans effet s'ils ne sont pas activés.
 - **Pas de tests unitaires** : `--selftest` (7 scénarios) et le passage sur les 50 fichiers de `tests/` servent de vérification.
 
@@ -286,10 +289,10 @@ Effort : S = quelques heures, M = une à deux journées, L = plus.
 | # | Piste (référence) | Pour qui | Comment ça reste instantané | Effort |
 |---|---|---|---|---|
 | B1 | **Aperçu rapide à la barre d'espace** (fait) depuis l'explorateur (QuickLook de macOS) : le lecteur s'ouvre en vue épurée, et Échap le ferme | tous | Le lecteur déjà ouvert reçoit le fichier par le tube nommé (moins de 30 ms mesurés). Au premier lancement, la fenêtre s'affiche avant que le contenu soit chargé (affichage différé) | S |
-| B2 | **Lire presque tous les formats d'image** (comme IrfanView ou XnView) : SVG, PSD (image fusionnée), TGA, QOI, HDR/EXR, PNM, plus les formats Windows déjà gérés | tous | Fonctions de la crate `image` (`tga`, `qoi`, `hdr`, `exr`, `pnm`) et `resvg` pour le SVG. Décodage dans un fil, un aperçu réduit affiché d'abord pour les grosses images | S |
-| B3 | **Autocomplétion dans les champs de recherche** (VS Code, navigateurs) : Ctrl+F propose les mots du document dès la 2e lettre, et les recherches récentes | dev, papiers | Index des mots construit dans un fil à l'ouverture du fichier (dictionnaire trié). Une recherche par préfixe dans un tableau trié coûte moins d'une milliseconde | S |
+| B2 | **Lire presque tous les formats d'image** (fait, par le socle) (comme IrfanView ou XnView) : SVG, PSD (image fusionnée), TGA, QOI, HDR/EXR, PNM, plus les formats Windows déjà gérés | tous | Fonctions de la crate `image` (`tga`, `qoi`, `hdr`, `exr`, `pnm`) et `resvg` pour le SVG. Décodage dans un fil, un aperçu réduit affiché d'abord pour les grosses images | S |
+| B3 | **Autocomplétion dans les champs de recherche** (fait) (VS Code, navigateurs) : Ctrl+F propose les mots du document dès la 2e lettre, et les recherches récentes | dev, papiers | Index des mots construit dans un fil à l'ouverture du fichier (dictionnaire trié). Une recherche par préfixe dans un tableau trié coûte moins d'une milliseconde | S |
 | B4 | **Surligner et sélectionner le texte dans les PDF** (Acrobat, navigateurs) : les résultats de recherche sont surlignés sur la page, et on peut sélectionner du texte à la souris pour le copier | papiers, dev | Positions des mots extraites par `lopdf` dans le fil PDF, une page à la fois, seulement pour les pages visibles, et gardées en cache par page | M |
 | B5 | **Touches multimédia et contrôles Windows** (fait) (Spotify, Tube) : lecture, pause et piste suivante même quand la fenêtre n'a pas le focus, avec la vignette dans le volume de Windows | YouTube, musique | API SMTC de Windows et raccourcis globaux, sans aucun calcul (Tube a déjà ce code, à réutiliser) | S |
-| B6 | **Palette de commandes Ctrl+K** (VS Code, Raycast) : taper « webp », « couper ici », « sombre »… | tous | Liste des actions en mémoire, recherche floue en moins d'une milliseconde, rien à charger | M |
+| B6 | **Palette de commandes Ctrl+K** (fait) (VS Code, Raycast) : taper « webp », « couper ici », « sombre »… | tous | Liste des actions en mémoire, recherche floue en moins d'une milliseconde, rien à charger | M |
 | B7 | **Exporter pour Discord / X en moins de 10 Mo** (outils de clips, Medal) : coupe la sélection et calcule le débit pour tenir sous la limite | jeu | Coupe sans réencodage si ça tient déjà, sinon réencodage par l'encodeur de la carte graphique (NVENC) en arrière-plan, avec barre de progression ; la fenêtre reste utilisable | M |
 | B8 | **OCR** (Text Extractor de PowerToys, Photos) : rendre le texte d'une photo ou d'un PDF scanné sélectionnable, copiable et cherchable | papiers | `Windows.Media.Ocr` intégré à Windows (pas de modèle à embarquer), lancé en arrière-plan sur la page visible, résultat mis en cache | M |

@@ -27,6 +27,36 @@ pub const ALL_EXTS: &[&str] = &[
 ];
 pub const DIALOG_PATTERN: &str = "*.heic;*.heif;*.avif;*.dng;*.cr2;*.nef;*.arw;*.srt;*.vtt;*.png;*.jpg;*.jpeg;*.webp;*.gif;*.bmp;*.ico;*.tif;*.tiff;*.mp3;*.wav;*.m4a;*.aac;*.flac;*.wma;*.mp4;*.mov;*.m4v;*.mkv;*.avi;*.wmv;*.pdf;*.docx;*.txt;*.md;*.log;*.csv;*.json;*.toml;*.yaml;*.yml;*.ini;*.xml;*.html;*.css;*.js;*.ts;*.rs;*.py;*.c;*.cpp;*.h;*.cs;*.java;*.go;*.sh;*.ps1;*.bat;*.sql;*.lua;*.gd";
 
+/// Formats d'image lisibles : la liste du lecteur plus celle du socle (PSD, EXR, SVG, JXL, TGA, QOI, HDR…).
+fn is_image(e: &str) -> bool {
+    static ALL: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    IMAGE.contains(&e) || ALL.get_or_init(socle::images::extensions).contains(&e)
+}
+
+/// Toutes les extensions prises en charge (« Ouvrir avec »).
+pub fn all_exts() -> Vec<&'static str> {
+    let mut v: Vec<&'static str> = ALL_EXTS.to_vec();
+    for e in socle::images::extensions() {
+        if !v.contains(&e) {
+            v.push(e);
+        }
+    }
+    v
+}
+
+/// Filtre de la boîte « Ouvrir ».
+pub fn dialog_pattern() -> String {
+    let mut s = DIALOG_PATTERN.to_string();
+    for e in socle::images::extensions() {
+        let pat = format!("*.{e}");
+        if !s.split(';').any(|x| x == pat) {
+            s.push(';');
+            s.push_str(&pat);
+        }
+    }
+    s
+}
+
 pub fn ext(p: &Path) -> String {
     p.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default()
 }
@@ -34,7 +64,7 @@ pub fn ext(p: &Path) -> String {
 pub fn of(p: &Path) -> Kind {
     let e = ext(p);
     let e = e.as_str();
-    if IMAGE.contains(&e) {
+    if is_image(e) {
         Kind::Image
     } else if e == "pdf" {
         Kind::Pdf
