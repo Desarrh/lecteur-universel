@@ -1537,8 +1537,9 @@ impl App {
         let ext = kind::ext(&path);
         let target = if replace { path.clone() } else { kind::free_path(&dir, &format!("{stem} (modifié)"), &ext) };
         if replace {
-            if let Some(tmp) = std::env::var_os("TEMP") {
-                let bak = PathBuf::from(tmp).join("lecteur-universel-sauvegardes");
+            // Sauvegarde de l'original dans %LOCALAPPDATA% (durable, contrairement à %TEMP%)
+            {
+                let bak = socle::paths::cache_dir(crate::APP).join("sauvegardes");
                 let _ = std::fs::create_dir_all(&bak);
                 let _ = std::fs::copy(&path, bak.join(format!("{}-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0), path.file_name().unwrap_or_default().to_string_lossy())));
             }

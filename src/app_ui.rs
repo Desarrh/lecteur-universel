@@ -687,7 +687,7 @@ impl App {
                 let dirty = v.text != v.saved && !v.truncated;
                 ui.add_enabled_ui(dirty, |ui| {
                     if icons::wide(ui, Icon::Save, "Enregistrer", "Ctrl+S", w, Some((p.accent, p.on_accent)), &p)
-                        .on_hover_text("Écrit le fichier ; l'ancienne version est gardée dans %TEMP%\\lecteur-universel-sauvegardes")
+                        .on_hover_text("Écrit le fichier ; l'ancienne version est gardée dans %LOCALAPPDATA%\\lecteur-universel\\sauvegardes")
                         .clicked()
                     {
                         action = Some("save_replace");

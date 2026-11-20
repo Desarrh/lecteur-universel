@@ -175,7 +175,7 @@ Toutes les valeurs ci-dessous sont définies dans **`src/theme.rs`**, sauf menti
 - Contenu : thème, récents, positions de reprise (au plus 300), taille de la fenêtre, volume, panneau masqué, mise à jour automatique et date de la dernière vérification.
 - Sauvegardé à la fermeture.
 
-**Sauvegardes** : avant chaque remplacement, l'original est copié dans `%TEMP%\lecteur-universel-sauvegardes\<horodatage>-nom`.
+**Sauvegardes** : avant chaque remplacement, l'original est copié dans `%LOCALAPPDATA%\lecteur-universel\sauvegardes\<horodatage>-nom` (durable ; `%TEMP%` peut être vidé par Windows).
 
 **Code**
 - Commentaires et messages en français.
