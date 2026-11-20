@@ -4,3 +4,4 @@
 /tests/
 *.exe.old
 /.cargo/
+/egm/
