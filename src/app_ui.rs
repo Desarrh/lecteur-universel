@@ -440,6 +440,16 @@ impl App {
                 let playing = m.p.as_ref().map(|x| x.playing()).unwrap_or(false);
                 let show = controls || !playing || kind == Kind::Audio;
                 act = draw_media(ui, m, kind, &mut t.sel, &p, show, dark_media);
+                if m.sfind_open {
+                    if let Some(r) = subs_find_bar(&ctx, m, &p, &mut self.s.search_history) {
+                        self.occl.push(r);
+                        // la liste des suggestions passe aussi au-dessus de la vidéo
+                        let list = egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("subs_find_field").with("liste"));
+                        if let Some(lr) = ctx.memory(|mem| mem.areas().is_visible(&list).then(|| mem.area_rect(list.id)).flatten()) {
+                            self.occl.push(lr);
+                        }
+                    }
+                }
                 if !show {
                     ctx.request_repaint_after(std::time::Duration::from_millis(400));
                 }
@@ -1490,6 +1500,75 @@ enum Strip<'a> {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// L1 : barre « chercher une phrase » posée en haut de la vidéo. Entrée = réplique suivante,
+/// Maj+Entrée = précédente, Échap ferme. Renvoie sa zone (à découper de la vidéo).
+fn subs_find_bar(ctx: &egui::Context, m: &mut MedV, p: &Palette, hist: &mut socle::autocomplete::History) -> Option<Rect> {
+    let cues = &m.subs.as_ref()?.1;
+    if !m.sac.is_built() {
+        m.sac.index(&crate::subs::all_text(cues), hist);
+    }
+    if m.sfind_last != m.sfind {
+        m.sfind_hits = crate::subs::find(cues, &m.sfind);
+        m.sfind_last = m.sfind.clone();
+    }
+    let top = m.vrect.map(|r| r.top()).unwrap_or(60.0).max(8.0) + 12.0;
+    let mut go = 0i32;
+    let mut close = false;
+    let area = egui::Area::new(egui::Id::unique("subs_find")).order(egui::Order::Foreground).anchor(Align2::CENTER_TOP, vec2(0.0, top)).show(ctx, |ui| {
+        Frame::new()
+            .fill(p.surface)
+            .stroke(Stroke::new(1.0, p.border))
+            .corner_radius(CornerRadius::same(10))
+            .inner_margin(Margin::symmetric(10, 6))
+            .shadow(egui::Shadow { offset: [0, 4], blur: 14, spread: 0, color: Color32::from_black_alpha(60) })
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    let ar = m.sac.field(ui, p, egui::Id::unique("subs_find_field"), &mut m.sfind, "Chercher une phrase dite…", 280.0, hist);
+                    ui.add_space(26.0);
+                    if m.sfind_focus {
+                        ar.response.request_focus();
+                        m.sfind_focus = false;
+                    }
+                    if ar.submitted.is_some() {
+                        go = if ui.input(|i| i.modifiers.shift) { -1 } else { 1 };
+                        m.sfind_focus = true;
+                    }
+                    if ar.response.has_focus() && ui.input(|i| i.key_pressed(Key::Escape)) {
+                        close = true;
+                    }
+                    let n = m.sfind_hits.len();
+                    let label = if m.sfind.trim().is_empty() { String::new() } else if n == 0 { "aucune réplique".into() } else { format!("{n} réplique{}", if n > 1 { "s" } else { "" }) };
+                    ui.label(RichText::new(label).size(12.0).color(if n == 0 && !m.sfind.trim().is_empty() { p.del } else { p.muted }));
+                    let lk = Look { fg: p.text, bg: Color32::TRANSPARENT, hover: p.hover_bg, round: false };
+                    if icons::button(ui, Icon::StepBack, 28.0, lk, "Réplique précédente (Maj+Entrée)").clicked() {
+                        go = -1;
+                    }
+                    if icons::button(ui, Icon::StepFwd, 28.0, lk, "Réplique suivante (Entrée)").clicked() {
+                        go = 1;
+                    }
+                    if icons::button(ui, Icon::Close, 28.0, lk, "Fermer (Échap)").clicked() {
+                        close = true;
+                    }
+                });
+            });
+    });
+    if go != 0 {
+        if let Some(pl) = m.p.as_mut() {
+            let now = pl.time() - m.sub_offset;
+            let hits = &m.sfind_hits;
+            let to = if go > 0 { hits.iter().find(|&&t| t > now + 0.3).or(hits.first()) } else { hits.iter().rev().find(|&&t| t < now - 0.8).or(hits.last()) };
+            if let Some(&t) = to {
+                pl.seek((t + m.sub_offset - 0.2).max(0.0));
+            }
+        }
+    }
+    if close {
+        m.sfind_open = false;
+    }
+    Some(area.response.rect)
+}
+
 fn draw_media(ui: &mut Ui, m: &mut MedV, kind: Kind, sel: &mut (Option<f64>, Option<f64>), p: &Palette, controls: bool, dark: bool) -> MediaAct {
     m.vrect = None;
     if let Some(e) = &m.err {
@@ -1502,6 +1581,11 @@ fn draw_media(ui: &mut Ui, m: &mut MedV, kind: Kind, sel: &mut (Option<f64>, Opt
     let full = ui.available_rect_before_wrap();
     let narrow = full.width() < 640.0;
     let mut act = MediaAct::None;
+    // Repères de la frise : points forts (L2) et phrases trouvées dans les sous-titres (L1)
+    let mut marks: Vec<Mark> = m.moments.iter().flatten().map(|x| (x.t, p.live, format!("Point fort à {} · +{:.0} dB   (N suivant · E exporter ±10 s)", hms(x.t), x.gain))).collect();
+    if m.sfind_open {
+        marks.extend(m.sfind_hits.iter().map(|t| (*t + m.sub_offset, p.accent, format!("« {} » à {}", m.sfind.trim(), hms(*t + m.sub_offset)))));
+    }
     // Boucle sur la sélection
     if let (Some(pl), true) = (m.p.as_mut(), m.loop_sel) {
         if let (Some(a), Some(b)) = *sel {
@@ -1573,7 +1657,7 @@ fn draw_media(ui: &mut Ui, m: &mut MedV, kind: Kind, sel: &mut (Option<f64>, Opt
         let strip = Rect::from_min_size(pos2(inner.left(), row1.bottom() + 8.0), vec2(inner.width(), 62.0));
         let row3 = Rect::from_min_max(pos2(inner.left(), strip.bottom() + 10.0), inner.max);
         act = time_row(ui, row1, pl, sel, kind, dark, p);
-        trim_strip(ui, strip, pl, sel, Strip::Thumbs(&m.thumbs), p, dark);
+        trim_strip(ui, strip, pl, sel, Strip::Thumbs(&m.thumbs), p, dark, &marks);
         if let Some(a) = transport(ui, row3, pl, &mut m.loop_sel, kind, p, dark, narrow) {
             act = a;
         }
@@ -1594,7 +1678,7 @@ fn draw_media(ui: &mut Ui, m: &mut MedV, kind: Kind, sel: &mut (Option<f64>, Opt
     let strip = Rect::from_min_size(pos2(inner.left(), row1.bottom() + 8.0), vec2(inner.width(), wave_h));
     let row3 = Rect::from_min_size(pos2(inner.left(), strip.bottom() + 16.0), vec2(inner.width(), 48.0));
     act = time_row(ui, row1, pl, sel, kind, p.dark, p);
-    trim_strip(ui, strip, pl, sel, Strip::Wave(m.peaks.as_deref()), p, p.dark);
+    trim_strip(ui, strip, pl, sel, Strip::Wave(m.peaks.as_deref()), p, p.dark, &marks);
     if let Some(a) = transport(ui, row3, pl, &mut m.loop_sel, kind, p, false, narrow) {
         act = a;
     }
@@ -1662,7 +1746,11 @@ fn time_row(ui: &mut Ui, r: Rect, pl: &mut Player, sel: &mut (Option<f64>, Optio
 
 /// Frise façon éditeur mobile : vignettes (ou forme d'onde), cadre à poignées
 /// qu'on rapproche pour couper, tête de lecture. Glisser ailleurs = se déplacer.
-fn trim_strip(ui: &mut Ui, r: Rect, pl: &mut Player, sel: &mut (Option<f64>, Option<f64>), content: Strip, p: &Palette, dark: bool) {
+/// Repère sur la frise : instant, couleur, infobulle (points forts, résultats de recherche).
+type Mark = (f64, Color32, String);
+
+#[allow(clippy::too_many_arguments)]
+fn trim_strip(ui: &mut Ui, r: Rect, pl: &mut Player, sel: &mut (Option<f64>, Option<f64>), content: Strip, p: &Palette, dark: bool, marks: &[Mark]) {
     const HW: f32 = 16.0;
     let dur = pl.duration.max(0.001);
     let id = egui::Id::unique("trim_strip");
@@ -1742,6 +1830,21 @@ fn trim_strip(ui: &mut Ui, r: Rect, pl: &mut Player, sel: &mut (Option<f64>, Opt
     ui.painter().line_segment([pos2(x, r.top() - 5.0), pos2(x, r.bottom() + 5.0)], Stroke::new(3.0, Color32::WHITE));
     ui.painter().line_segment([pos2(x, r.top() - 5.0), pos2(x, r.bottom() + 5.0)], Stroke::new(1.0, Color32::from_black_alpha(90)));
     ui.painter().circle_filled(pos2(x, r.top() - 5.0), 4.0, Color32::WHITE);
+    // Repères (L1 : phrases trouvées, L2 : points forts) : trait fin + petit triangle en haut
+    let hover = ui.input(|i| i.pointer.hover_pos());
+    let mut tip: Option<&str> = None;
+    for (t, c, label) in marks {
+        let mx = x_of(*t);
+        ui.painter().line_segment([pos2(mx, inner.top()), pos2(mx, inner.bottom())], Stroke::new(2.0, c.gamma_multiply(0.85)));
+        let tri = vec![pos2(mx - 5.0, r.top() - 1.0), pos2(mx + 5.0, r.top() - 1.0), pos2(mx, r.top() + 6.0)];
+        ui.painter().add(egui::Shape::convex_polygon(tri, *c, Stroke::new(1.0, Color32::from_black_alpha(80))));
+        if hover.is_some_and(|h| r.expand2(vec2(0.0, 6.0)).contains(h) && (h.x - mx).abs() < 6.0) {
+            tip = Some(label.as_str());
+        }
+    }
+    if let Some(tip) = tip {
+        egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), id.with("repere"), egui::PopupAnchor::Pointer).show(|ui| ui.label(tip));
+    }
     // Interaction : 0 = déplacer la tête, 1 = poignée début, 2 = poignée fin
     let mode_id = id.with("mode");
     if resp.drag_started() || resp.clicked() {
@@ -1771,7 +1874,11 @@ fn trim_strip(ui: &mut Ui, r: Rect, pl: &mut Player, sel: &mut (Option<f64>, Opt
                 *sel = (Some(a), Some(t));
                 pl.seek(t);
             }
-            _ => pl.seek(t),
+            _ => {
+                // un clic près d'un repère y saute exactement
+                let snap = marks.iter().map(|m| m.0).filter(|m| (x_of(*m) - q.x).abs() < 6.0).min_by(|a, b| (x_of(*a) - q.x).abs().total_cmp(&(x_of(*b) - q.x).abs()));
+                pl.seek(snap.filter(|_| resp.clicked()).unwrap_or(t));
+            }
         }
     }
     if resp.drag_stopped() {

@@ -51,6 +51,7 @@ Historique : l'étude initiale (choix des API, compromis) est dans [ETUDE-STACK.
 | `docx.rs` | Lecture d'un .docx (paragraphes, styles, listes, tableaux, images) et export TXT, MD ou HTML |
 | `subs.rs`, `wic.rs`, `clip.rs` | Sous-titres SRT/VTT ; `open_any` (socle, avec repli par l'extension), aperçu réduit rapide par WIC, encodeur HEIC ; image vers le presse-papiers (DIB) |
 | `winx.rs`, `update.rs` | Boîte « Ouvrir », inscription « Ouvrir avec » ; mise à jour depuis GitHub par `socle::update` (thème, icônes, instance unique, réglages et plantages viennent aussi du socle) |
+| `moments.rs` | **Points forts (L2)** : niveau sonore lu en flux (`media::loudness`, 50 ms), montées de plus de 10 dB au-dessus des 10 s précédentes, espacées d'au moins 8 s ; calcul dans un fil annulé à la fermeture de l'onglet, cache `%LOCALAPPDATA%\lecteur-universel\points-forts` |
 | `smtc.rs` | Panneau multimédia de Windows et touches multimédia (repris de Tube), créé au premier son ou vidéo |
 | `testgen.rs` | Génère le dossier `tests/` (tous les formats, plus une vidéo synthétique à la résolution de l'écran) |
 
@@ -163,6 +164,8 @@ Toutes les valeurs ci-dessous sont définies dans **`src/theme.rs`**, sauf menti
 | C | capture vidéo |
 | V · G / H | sous-titres · décalage des sous-titres |
 | Ctrl+K · F1 | palette de commandes · tous les raccourcis |
+| Ctrl+F (vidéo) | **L1** : chercher une phrase dans les sous-titres ; repères bleus sur la frise, Entrée / Maj+Entrée = réplique suivante / précédente |
+| N · Maj+N · E | **L2** : point fort suivant / précédent · exporter ce moment (±10 s, coupe rapide) ; repères orange sur la frise |
 | Ctrl+F / H / G / E | rechercher (avec autocomplétion : Tab complète, ↑↓ choisit) / remplacer / aller à la ligne / aperçu Markdown (Ctrl+F marche aussi dans les PDF) |
 | Ctrl+S / Ctrl+Maj+S | **texte** : enregistrer le fichier / enregistrer une copie — **image** : copie / remplacer |
 | R / Maj+R · Ctrl+Z | pivoter · annuler (image) |
@@ -259,12 +262,13 @@ Toutes les valeurs ci-dessous sont définies dans **`src/theme.rs`**, sauf menti
 - **Sous-titres** : seulement les fichiers externes ; les pistes intégrées aux MKV et MP4 sont ignorées.
 - **Mode GPU direct** : la capture redécode depuis le fichier (environ 100 ms), et les éléments posés sur la vidéo doivent être déclarés comme zones à découper (`occl`).
 - **Fichiers volumineux** : un fichier texte de plus de 8 Mo est tronqué et passe en lecture seule. Les textures des GIF animés sont limitées à 200 Mo.
+- **L1** ne cherche que dans les sous-titres externes (.srt / .vtt à côté de la vidéo ou glissés dessus), pas dans les pistes intégrées. **L2** se fie au son seul : une musique forte ou une voix qui crie compte aussi ; pas d'analyse dans l'aperçu rapide (qui reste léger). Le cache des points forts n'est pas versionné : à vider si l'algorithme change.
 - **Socle v0.1.2** : un TGA non compressé est pris pour un curseur (en-tête `00 00 02 00`) → le lecteur retente par l'extension ; un DDS non compressé n'est pas renvoyé vers WIC (« format DDS non pris en charge »). Signalés au socle.
 - **Dette**
   - `app_ui.rs` (1 900 lignes) et `app.rs` (1 450) sont gros ; le dessin des vues mériterait un fichier par type.
   - `vidwin` et `smtc` restent copiés entre le lecteur et Tube (candidats pour le socle).
   - Le code contient des modes de test (`LECTEUR_*`) ; sans effet s'ils ne sont pas activés.
-- **Pas de tests unitaires** : `--selftest` (7 scénarios) et le passage sur les 50 fichiers de `tests/` servent de vérification.
+- **Pas de tests unitaires** : `--selftest` (10 scénarios, dont points forts, niveau sonore en flux et recherche dans les sous-titres ; `--generer-partie <dossier>` crée une vidéo de jeu de 60 s avec trois explosions et ses sous-titres) et le passage sur les 50 fichiers de `tests/` servent de vérification.
 
 ## 9. Pistes QoL (non implémentées — à valider)
 
@@ -277,8 +281,8 @@ Effort : S = quelques heures, M = une à deux journées, L = plus.
 | # | Piste | Pour qui | Comment ça reste instantané | Effort |
 |---|---|---|---|---|
 | A1 | **Conversion devinée à l'avance** : dès que la souris survole un format dans « Convertir », le lecteur commence la conversion en arrière-plan. Au clic, le fichier est déjà prêt et simplement déplacé | tous | Fil de travail lancé au survol, annulé si la souris part. Résultat dans `%TEMP%`, puis renommé au clic (pas de recopie). Limité aux conversions rapides (images, texte, coupe sans réencodage) | M |
-| A2 | **Points forts automatiques dans les enregistrements de jeu** : la frise affiche des repères là où le son monte d'un coup (explosions, combats, cris). Clic = saut au moment, et « Exporter ce moment » crée un clip de ±10 s | jeu | Calcul sur le son déjà décodé pour la forme d'onde, réduit à 8 kHz mono : environ 1 s de calcul par heure de vidéo, dans un fil. Repères mis en cache par fichier (taille + date) | M |
-| A3 | **Chercher une phrase dans une vidéo** : Ctrl+F sur une vidéo cherche dans ses sous-titres. Chaque occurrence devient un repère doré sur la frise, et Entrée saute au moment où la phrase est dite | YouTube, films | Répliques en mémoire, triées par temps. Recherche linéaire sur quelques milliers de lignes (moins d'une milliseconde), repères redessinés à chaque image | S |
+| A2 | **Points forts automatiques dans les enregistrements de jeu** (fait : L2) : la frise affiche des repères là où le son monte d'un coup (explosions, combats, cris). Clic = saut au moment, et « Exporter ce moment » crée un clip de ±10 s | jeu | Calcul sur le son déjà décodé pour la forme d'onde, réduit à 8 kHz mono : environ 1 s de calcul par heure de vidéo, dans un fil. Repères mis en cache par fichier (taille + date) | M |
+| A3 | **Chercher une phrase dans une vidéo** (fait : L1) : Ctrl+F sur une vidéo cherche dans ses sous-titres. Chaque occurrence devient un repère doré sur la frise, et Entrée saute au moment où la phrase est dite | YouTube, films | Répliques en mémoire, triées par temps. Recherche linéaire sur quelques milliers de lignes (moins d'une milliseconde), repères redessinés à chaque image | S |
 | A4 | **« Copier comme… »** (Ctrl+Maj+C) : copie le fichier ouvert dans le presse-papiers sous un autre format, sans rien enregistrer. Par exemple HEIC → PNG à coller dans Discord, Word → texte Markdown, image de vidéo → PNG, PDF → texte | tous | Conversion en mémoire dans un fil ; le presse-papiers est rempli dès qu'elle est finie, avec un toast « Copié ». Formats légers seulement (pas de vidéo) | S |
 | A5 | **Remonter le temps d'un fichier texte** : un curseur fait défiler les versions précédentes (sauvegardes du lecteur et, si le fichier est dans un dépôt git, l'historique git), comme on fait défiler une vidéo, avec les lignes changées surlignées | dev | Versions listées en différé, contenu lu seulement quand on s'arrête sur une version. Différences calculées dans un fil et gardées en cache (au plus 20 versions en mémoire) | M |
 | A6 | **Papier officiel prêt à envoyer** : sur la photo d'un document, détection des bords de la feuille, redressement, rendu « document scanné », puis nom de fichier proposé à partir du texte lu (« Facture EDF 2026-11.pdf ») | papiers | Bords détectés sur une version réduite (environ 600 px, moins de 20 ms). L'OCR Windows tourne en arrière-plan après l'affichage et le nom proposé arrive dès qu'il est prêt. Le PDF est déjà généré en parallèle | M |

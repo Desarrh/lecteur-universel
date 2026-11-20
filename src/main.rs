@@ -8,6 +8,7 @@ mod editor;
 pub use socle::icons;
 mod kind;
 mod media;
+mod moments;
 mod montage;
 mod pdfgen;
 mod smtc;
@@ -676,16 +677,17 @@ fn main() {
         std::process::exit(if r.is_ok() { 0 } else { 1 });
     }
     // lecteur-universel --generer-tests <dossier> [largeur hauteur ips secondes]
+    // --generer-partie <dossier> : seulement la vidéo « partie de jeu » + ses sous-titres (tests L1 / L2)
+    if args.first().map(|a| a == "--generer-partie").unwrap_or(false) && args.len() > 1 {
+        media::init_thread();
+        let (a, b) = testgen::game_sample(std::path::Path::new(&args[1]));
+        println!("vidéo : {a:?} · sous-titres : {b:?}");
+        return;
+    }
     if args.first().map(|a| a == "--generer-tests").unwrap_or(false) && args.len() > 1 {
         media::init_thread();
         let n = |i: usize, d: u32| args.get(i).and_then(|v| v.parse().ok()).unwrap_or(d);
         testgen::generate(std::path::Path::new(&args[1]), (n(2, 5120), n(3, 1440), n(4, 60), n(5, 60)), &|l| println!("{l}"));
-        return;
-    }
-    // Test du remplacement : lecteur-universel --maj-test <url du zip>
-    if args.first().map(|a| a == "--maj-test").unwrap_or(false) && args.len() > 1 {
-        let r = update::Release { version: "9.9.9".into(), tag: "v9.9.9".into(), url: args[1].clone(), page: String::new(), notes: String::new() };
-        println!("{:?}", update::install(&r, &|_| {}));
         return;
     }
     if args.first().map(|a| a == "--thumbs").unwrap_or(false) && args.len() > 1 {

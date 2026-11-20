@@ -92,6 +92,20 @@ pub fn find_sidecar(video: &Path) -> Option<PathBuf> {
     best
 }
 
+/// Répliques qui contiennent `q` (sans tenir compte de la casse ni des accents) : leurs débuts (s).
+pub fn find(cues: &[Cue], q: &str) -> Vec<f64> {
+    let q = socle::fuzzy::fold(q.trim());
+    if q.is_empty() {
+        return Vec::new();
+    }
+    cues.iter().filter(|c| socle::fuzzy::fold(&c.text).contains(&q)).map(|c| c.start).collect()
+}
+
+/// Texte de toutes les répliques (mots proposés par l'autocomplétion).
+pub fn all_text(cues: &[Cue]) -> String {
+    cues.iter().map(|c| c.text.as_str()).collect::<Vec<_>>().join("\n")
+}
+
 pub fn at(cues: &[Cue], t: f64) -> Option<&str> {
     let i = cues.partition_point(|c| c.start <= t);
     cues[..i].iter().rev().take(4).find(|c| t < c.end).map(|c| c.text.as_str())

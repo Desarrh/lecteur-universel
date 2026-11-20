@@ -101,6 +101,32 @@ fn beeps(secs: f64, rate: u32) -> Pcm {
     Pcm { samples, channels: 2, rate }
 }
 
+/// Son d'une « partie de jeu » : fond calme (≈ -40 dB) et trois explosions (bruit qui décroît)
+/// à 15 s, 32 s et 50 s, pour tester les points forts (L2).
+fn game_audio(secs: f64, rate: u32) -> Pcm {
+    let n = (secs * rate as f64) as usize;
+    let mut samples = Vec::with_capacity(n * 2);
+    let mut seed = 0x2545_F491u32;
+    for i in 0..n {
+        let t = i as f64 / rate as f64;
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        let noise = (seed as f64 / u32::MAX as f64) * 2.0 - 1.0;
+        let mut v = (t * 110.0 * std::f64::consts::TAU).sin() * 0.012;
+        for boom in [15.0, 32.0, 50.0] {
+            let d = t - boom;
+            if (0.0..1.2).contains(&d) {
+                v += noise * 0.75 * (-d * 3.0).exp();
+            }
+        }
+        let s = (v.clamp(-1.0, 1.0) * 32767.0) as i16;
+        samples.push(s);
+        samples.push(s);
+    }
+    Pcm { samples, channels: 2, rate }
+}
+
 /// Mélodie courte (gamme) pour les fichiers audio.
 fn melody(secs: f64, rate: u32) -> Pcm {
     let notes = [261.6, 293.7, 329.6, 349.2, 392.0, 440.0, 493.9, 523.3];
@@ -132,7 +158,13 @@ fn video_type(sub: &GUID, w: u32, h: u32, fps: u32) -> Result<IMFMediaType> {
 
 /// Vidéo synthétique + bips. `codec` : H.264 (MP4), HEVC (MP4) ou WMV (ASF).
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub fn make_video(out: &Path, codec: &GUID, w: u32, h: u32, fps: u32, secs: u32, kbps: u32, hw: bool, progress: &dyn Fn(f32)) -> Result<()> {
+    make_video_with(out, codec, w, h, fps, secs, kbps, hw, progress, beeps)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn make_video_with(out: &Path, codec: &GUID, w: u32, h: u32, fps: u32, secs: u32, kbps: u32, hw: bool, progress: &dyn Fn(f32), audio: fn(f64, u32) -> Pcm) -> Result<()> {
     let _ = std::fs::remove_file(out);
     unsafe {
         let mut wa = None;
@@ -177,7 +209,7 @@ pub fn make_video(out: &Path, codec: &GUID, w: u32, h: u32, fps: u32, secs: u32,
             _ => None,
         };
         wr.BeginWriting()?;
-        let pcm = beeps(secs as f64, rate);
+        let pcm = audio(secs as f64, rate);
         let total = (fps * secs) as u64;
         let fdur = 10_000_000i64 / fps as i64;
         let mut px = vec![0u32; (w * h) as usize];
@@ -469,6 +501,10 @@ pub fn generate(dir: &Path, big: (u32, u32, u32, u32), log: &dyn Fn(String)) {
         .map_err(|e| e.to_string()),
     );
     small("court-1080p-60ips.mp4", &MFVideoFormat_H264, 1920, 1080, 60, 8);
+    // Partie de jeu (60 s, trois explosions) + sous-titres : points forts (L2) et recherche de phrase (L1)
+    let (r1, r2) = game_sample(&vid);
+    ok("partie-de-jeu.mp4", r1);
+    ok("partie-de-jeu.srt", r2);
     small("court-vertical.mp4", &MFVideoFormat_H264, 1080, 1920, 30, 6);
     small("court.wmv", &MFVideoFormat_WMV3, 1280, 720, 30, 6);
     let _ = std::fs::copy(vid.join("court-720p-30ips.mp4"), vid.join("court.m4v"));
@@ -495,4 +531,16 @@ pub fn generate(dir: &Path, big: (u32, u32, u32, u32), log: &dyn Fn(String)) {
     if r.is_err() {
         log(format!("ÉCHEC  {name}"));
     }
+}
+
+
+/// Vidéo « partie de jeu » (60 s, trois explosions) et ses sous-titres, dans `vid`.
+pub fn game_sample(vid: &Path) -> (std::result::Result<(), String>, std::result::Result<(), String>) {
+    let p = vid.join("partie-de-jeu.mp4");
+    let mut r = make_video_with(&p, &MFVideoFormat_H264, 1280, 720, 30, 60, 4000, true, &|_| {}, game_audio);
+    if r.is_err() {
+        r = make_video_with(&p, &MFVideoFormat_H264, 1280, 720, 30, 60, 4000, false, &|_| {}, game_audio);
+    }
+    let srt = "1\r\n00:00:03,000 --> 00:00:06,000\r\nOn y va, tout le monde en position.\r\n\r\n2\r\n00:00:14,000 --> 00:00:16,500\r\nAttention, ça va exploser !\r\n\r\n3\r\n00:00:31,000 --> 00:00:34,000\r\nEncore une explosion derrière nous.\r\n\r\n4\r\n00:00:49,000 --> 00:00:52,000\r\nOn a gagné la partie !\r\n";
+    (r.map_err(|e| e.message().to_string()), std::fs::write(vid.join("partie-de-jeu.srt"), srt).map_err(|e| e.to_string()))
 }

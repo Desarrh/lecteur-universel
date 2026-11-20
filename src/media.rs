@@ -583,6 +583,61 @@ pub fn decode_pcm(path: &str, range: Option<(f64, f64)>, progress: &dyn Fn(f32))
     }
 }
 
+/// Niveau sonore (dBFS) par tranche de `hop` secondes, lu en flux sans garder le son
+/// (une heure de vidéo = 72 000 valeurs). `cancel` interrompt la lecture.
+pub fn loudness(path: &str, hop: f64, cancel: &socle::Cancel) -> Result<Vec<f32>> {
+    unsafe {
+        let r = reader(path, false)?;
+        let a = MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32;
+        r.SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS.0 as u32, false)?;
+        r.SetStreamSelection(a, true)?;
+        let mt = MFCreateMediaType()?;
+        mt.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)?;
+        mt.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM)?;
+        mt.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)?;
+        r.SetCurrentMediaType(a, None, &mt)?;
+        let cur = r.GetCurrentMediaType(a)?;
+        let channels = cur.GetUINT32(&MF_MT_AUDIO_NUM_CHANNELS)?.max(1) as usize;
+        let rate = cur.GetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND)?.max(1) as f64;
+        let win = ((rate * hop) as usize).max(1) * channels;
+        let (mut acc, mut n) = (0f64, 0usize);
+        let mut out = Vec::new();
+        let db = |ms: f64| (10.0 * ms.max(1e-9).log10()) as f32;
+        loop {
+            if cancel.is_cancelled() {
+                return Err(Error::from(windows::Win32::Foundation::E_ABORT));
+            }
+            let mut flags = 0u32;
+            let mut sample = None;
+            r.ReadSample(a, 0, None, Some(&mut flags), None, Some(&mut sample))?;
+            if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
+                break;
+            }
+            let Some(s) = sample else { continue };
+            let buf = s.ConvertToContiguousBuffer()?;
+            let mut p = std::ptr::null_mut();
+            let mut len = 0u32;
+            buf.Lock(&mut p, None, Some(&mut len))?;
+            let sl = std::slice::from_raw_parts(p as *const i16, len as usize / 2);
+            for &x in sl {
+                let v = x as f64 / 32768.0;
+                acc += v * v;
+                n += 1;
+                if n == win {
+                    out.push(db(acc / n as f64));
+                    acc = 0.0;
+                    n = 0;
+                }
+            }
+            buf.Unlock()?;
+        }
+        if n > 0 {
+            out.push(db(acc / n as f64));
+        }
+        Ok(out)
+    }
+}
+
 /// Crêtes pour la forme d'onde (une valeur 0..1 par tranche).
 pub fn peaks(p: &Pcm, buckets: usize) -> Vec<f32> {
     let frames = p.samples.len() / p.channels.max(1) as usize;

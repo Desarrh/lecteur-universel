@@ -52,6 +52,8 @@ Results are saved next to the original (never overwritten) and can be **dragged*
 | Key | Action |
 |---|---|
 | Ctrl+K · F1 | command palette (every action, fuzzy search) · all shortcuts |
+| Ctrl+F (video) | find a spoken line in the subtitles: blue marks on the timeline, Enter jumps to the next one |
+| N · Shift+N · E | next / previous highlight (sudden loud moments of a game recording, orange marks) · export ±10 s around it |
 | Space / K | play / pause |
 | ← → (Shift: 1 s) · J / L | seek ±5 s · ±10 s |
 | , . | previous / next frame |

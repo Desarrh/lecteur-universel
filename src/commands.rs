@@ -55,6 +55,10 @@ impl App {
                 if kind == Some(Kind::Video) {
                     v.push(Command::new("capture", "Capturer l'image en PNG").group(g).keys("C").icon(Icon::Camera));
                     v.push(Command::new("subs", "Sous-titres oui / non").group(g).keys("V").icon(Icon::Subs));
+                    v.push(Command::new("sfind", "Chercher une phrase dans les sous-titres").group(g).keys("Ctrl+F").icon(Icon::Search));
+                    v.push(Command::new("mom_next", "Point fort suivant").group("Points forts").keys("N").icon(Icon::Bolt));
+                    v.push(Command::new("mom_prev", "Point fort précédent").group("Points forts").keys("Maj+N").icon(Icon::Bolt));
+                    v.push(Command::new("mom_export", "Exporter ce moment (±10 s)").group("Points forts").keys("E").icon(Icon::Scissors));
                 }
             }
             _ => {}
@@ -105,6 +109,18 @@ impl App {
             "capture" => self.capture(),
             "cut_fast" => self.cut_media(false),
             "cut_exact" => self.cut_media(true),
+            "mom_export" => self.export_moment(),
+            "sfind" => {
+                if let Some(View::Media(m)) = self.tabs.get_mut(self.active).map(|t| &mut t.view) {
+                    if m.subs.is_some() {
+                        m.sfind_open = true;
+                        m.sfind_focus = true;
+                        m.sac.reset();
+                        return;
+                    }
+                }
+                self.toasts.error("Pas de sous-titres : glissez un fichier .srt ou .vtt sur la vidéo pour y chercher une phrase.");
+            }
             _ => {
                 if let Some(what) = id.strip_prefix("img:") {
                     self.edit_image(what);
@@ -132,9 +148,23 @@ impl App {
             t.sel = (None, None);
             return;
         }
+        let moments: Vec<f64> = match &t.view {
+            View::Media(m) => m.moments.iter().flatten().map(|x| x.t).collect(),
+            _ => Vec::new(),
+        };
         let Some(p) = t.player() else { return };
         let (now, dur) = (p.time(), p.duration);
         match id {
+            "mom_next" => {
+                if let Some(&x) = moments.iter().find(|&&x| x > now + 0.5) {
+                    p.seek(x);
+                }
+            }
+            "mom_prev" => {
+                if let Some(&x) = moments.iter().rev().find(|&&x| x < now - 1.0) {
+                    p.seek(x);
+                }
+            }
             "play" => p.toggle(),
             "back10" => p.seek(now - 10.0),
             "fwd10" => p.seek(now + 10.0),
@@ -159,6 +189,13 @@ impl App {
         }
         if self.help_open {
             socle::ui::help_window(ctx, &p, &mut self.help_open, &cmds);
+        }
+        // En lecture GPU, la vidéo est une sous-fenêtre au-dessus de l'interface : on y découpe
+        // la palette et l'aide pour qu'elles restent visibles.
+        for (id, open) in [("socle-palette", self.palette.is_open()), ("socle-aide", self.help_open)] {
+            if let Some(r) = ctx.memory(|m| m.area_rect(egui::Id::unique(id))).filter(|_| open) {
+                self.occl.push(r);
+            }
         }
     }
 }

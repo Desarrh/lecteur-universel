@@ -194,6 +194,18 @@ struct MedV {
     subs_on: bool,
     sub_offset: f64,
     sub_rect: Option<Rect>,
+    /// L1 : recherche d'une phrase dans les sous-titres (Ctrl+F) : barre ouverte, saisie,
+    /// instants trouvés (recalculés quand la saisie change), autocomplétion
+    sfind_open: bool,
+    sfind: String,
+    sfind_hits: Vec<f64>,
+    sfind_last: String,
+    sfind_focus: bool,
+    sac: crate::editor::SearchAc,
+    /// L2 : points forts (montées du son) calculés en arrière-plan, annulés à la fermeture
+    moments: Option<Vec<crate::moments::Moment>>,
+    moments_rx: Option<Receiver<Vec<crate::moments::Moment>>>,
+    moments_job: Option<crate::moments::CancelOnDrop>,
 }
 
 enum View {
@@ -750,6 +762,15 @@ impl App {
                     subs_on: true,
                     sub_offset: 0.0,
                     sub_rect: None,
+                    sfind_open: false,
+                    sfind: String::new(),
+                    sfind_hits: Vec::new(),
+                    sfind_last: String::new(),
+                    sfind_focus: false,
+                    sac: Default::default(),
+                    moments: None,
+                    moments_rx: None,
+                    moments_job: None,
                 }))
             }
         };
@@ -901,6 +922,7 @@ impl App {
         }
         let mut new_frames = 0u64;
         let active = self.active;
+        let preview_only = self.preview_only;
         let max_w = (self.view_w * ctx.pixels_per_point()) as u32;
         let max_h = (self.view_h * ctx.pixels_per_point()) as u32;
         for (i, t) in self.tabs.iter_mut().enumerate() {
@@ -920,8 +942,20 @@ impl App {
                             }
                         }
                     }
+                    if let Some(rx) = &m.moments_rx {
+                        if let Ok(v) = rx.try_recv() {
+                            m.moments = Some(v);
+                            m.moments_rx = None;
+                        }
+                    }
                     let Some(p) = m.p.as_mut() else { continue };
                     p.poll();
+                    // L2 : points forts d'une vidéo de plus de 20 s (pas dans l'aperçu rapide, qui reste léger)
+                    if t.kind == Kind::Video && p.ready && p.duration > 20.0 && m.moments_job.is_none() && !preview_only {
+                        let c = socle::Cancel::new();
+                        m.moments_rx = Some(crate::moments::spawn(t.path.clone(), self.wake.clone(), c.clone()));
+                        m.moments_job = Some(crate::moments::CancelOnDrop(c));
+                    }
                     if p.ready && p.has_video && !m.thumbs_started {
                         m.thumbs_started = true;
                         const N: usize = 40;
@@ -1132,10 +1166,22 @@ impl App {
         if pressed(Key::PageUp) {
             self.neighbour(ctx, -1);
         }
+        let (mut no_subs, mut export) = (false, false);
         let Some(t) = self.tabs.get_mut(self.active) else { return };
         let kind = t.kind;
         match &mut t.view {
             View::Media(m) => {
+                // L1 : Ctrl+F cherche une phrase dans les sous-titres
+                if ctrl && pressed(Key::F) && kind == Kind::Video {
+                    if m.subs.is_some() {
+                        m.sfind_open = true;
+                        m.sfind_focus = true;
+                        m.sac.reset();
+                    } else {
+                        no_subs = true;
+                    }
+                }
+                let moments: Vec<f64> = m.moments.iter().flatten().map(|x| x.t).collect();
                 if m.subs.is_some() {
                     if pressed(Key::V) {
                         m.subs_on = !m.subs_on;
@@ -1183,6 +1229,16 @@ impl App {
                 }
                 let now = p.time();
                 let dur = p.duration;
+                // L2 : N / Maj+N = point fort suivant / précédent ; E = exporter ce moment (±10 s)
+                if pressed(Key::N) && !ctrl {
+                    let to = if shift { moments.iter().rev().find(|&&x| x < now - 1.0) } else { moments.iter().find(|&&x| x > now + 0.5) };
+                    if let Some(&x) = to {
+                        p.seek(x);
+                    }
+                }
+                if pressed(Key::E) && !ctrl && !moments.is_empty() {
+                    export = true;
+                }
                 if pressed(Key::OpenBracket) || pressed(Key::I) {
                     t.sel = (Some(now), Some(t.sel.1.filter(|b| *b > now + 0.05).unwrap_or(dur)));
                 }
@@ -1202,6 +1258,12 @@ impl App {
                 }
                 if kind == Kind::Video && pressed(Key::C) {
                     self.capture();
+                }
+                if no_subs {
+                    self.say("Pas de sous-titres : glissez un fichier .srt ou .vtt sur la vidéo pour y chercher une phrase.", true);
+                }
+                if export {
+                    self.export_moment();
                 }
             }
             View::Pdf(v) => {
@@ -1355,6 +1417,18 @@ impl App {
 
     /// Exporte la sélection. Vidéo : `precise` = réencodage à l'image près,
     /// sinon copie sans réencodage (démarre sur l'image clé précédente).
+    /// L2 : exporte ±10 s autour du point fort le plus proche (à 15 s près), sinon autour de
+    /// l'instant courant. Coupe rapide (sans réencodage), à côté du fichier.
+    pub(crate) fn export_moment(&mut self) {
+        let Some(t) = self.tabs.get_mut(self.active) else { return };
+        let View::Media(m) = &t.view else { return };
+        let Some(p) = m.p.as_ref() else { return };
+        let (now, dur) = (p.time(), p.duration);
+        let c = m.moments.iter().flatten().map(|x| x.t).filter(|x| (x - now).abs() <= 15.0).min_by(|a, b| (a - now).abs().total_cmp(&(b - now).abs())).unwrap_or(now);
+        t.sel = (Some((c - 10.0).max(0.0)), Some((c + 10.0).min(dur)));
+        self.cut_media(false);
+    }
+
     fn cut_media(&mut self, precise: bool) {
         let Some(t) = self.tabs.get(self.active) else { return };
         let Some((a, b)) = t.range() else {
@@ -1664,6 +1738,21 @@ impl App {
         a.start_convert(Target::Webp, imgs.clone());
         let r = a.wait_job();
         res.push(("Lot de 2 images → WEBP".into(), r.as_ref().map(|v| v.len() == imgs.len()).unwrap_or(false), format!("{} fichiers", r.map(|v| v.len()).unwrap_or(0))));
+        // 8. L2 : un niveau calme (-40 dB) avec une explosion à 30 s (-8 dB) → un point fort à 30 s
+        let mut env = vec![-40.0f32; (60.0 / crate::moments::HOP) as usize];
+        for i in 0..6 {
+            env[(30.0 / crate::moments::HOP) as usize + i] = -8.0;
+        }
+        let ms = crate::moments::detect(&env, crate::moments::HOP);
+        res.push(("Point fort détecté (L2)".into(), ms.len() == 1 && (ms[0].t - 30.0).abs() < 0.5, format!("{ms:?}")));
+        // 9. L2 : niveau sonore lu en flux sur la vidéo de test
+        let lv = crate::media::loudness(&dir.join("v.mp4").to_string_lossy(), crate::moments::HOP, &socle::Cancel::new());
+        let n = lv.as_ref().map(|v| v.len()).unwrap_or(0);
+        res.push(("Niveau sonore en flux (L2)".into(), n > 100, format!("{n} valeurs")));
+        // 10. L1 : phrase trouvée dans les sous-titres, sans tenir compte des accents ni de la casse
+        let cues = crate::subs::parse("1\n00:00:01,000 --> 00:00:02,000\nBonjour\n\n2\n00:00:05,500 --> 00:00:07,000\nOn a gagné la partie !\n");
+        let hits = crate::subs::find(&cues, "GAGNE la");
+        res.push(("Phrase dans les sous-titres (L1)".into(), hits == vec![5.5], format!("{hits:?}")));
         res
     }
 }
