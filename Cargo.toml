@@ -1,6 +1,6 @@
 [package]
 name = "lecteur-universel"
-version = "0.4.2"
+version = "0.4.3"
 edition = "2024"
 description = "Lightweight universal file viewer and converter for Windows"
 license = "MIT"
@@ -42,7 +42,7 @@ lopdf = { version = "0.47.0", default-features = false }
 # Socle commun des applis (thème, icônes, palette Ctrl+K, autocomplétion, images, instance unique,
 # mise à jour, réglages, plantages, mode test). En local, .cargo/config.toml pointe vers ../socle.
 # Sans img-jxl (+2,2 Mo) : le JPEG XL passe par WIC (extension « JPEG XL » du Microsoft Store).
-socle = { git = "https://github.com/Desarrh/socle", tag = "v0.1.5", default-features = false, features = ["ui", "images", "img-exr", "img-svg", "img-wic", "settings", "crash", "instance", "update", "testmode"] }
+socle = { git = "https://github.com/Desarrh/socle", tag = "v0.1.6", default-features = false, features = ["ui", "images", "img-exr", "img-svg", "img-wic", "settings", "crash", "instance", "update", "testmode"] }
 
 [profile.dev.package."*"]
 opt-level = 2

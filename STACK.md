@@ -1,6 +1,6 @@
 # Lecteur universel — stack technique (document de référence)
 
-État vérifié dans le code de la **v0.4.2** (20/11/2026) : versions dans `Cargo.toml`, comportements dans `src/`. L'étude initiale (choix des API) est dans [ETUDE-STACK.md](ETUDE-STACK.md) ; ce fichier-ci fait foi.
+État vérifié dans le code de la **v0.4.3** (20/11/2026) : versions dans `Cargo.toml`, comportements dans `src/`. L'étude initiale (choix des API) est dans [ETUDE-STACK.md](ETUDE-STACK.md) ; ce fichier-ci fait foi.
 
 **Vocabulaire**
 - **Socle** : la crate Rust commune aux applis egui de l'auteur (dépôt public `Desarrh/socle`). Elle fournit le thème, les icônes vectorielles, les composants (palette Ctrl+K, autocomplétion, toasts), le décodage d'images, l'instance unique, la mise à jour, les réglages, le journal de plantage et le mode test. C'est une bibliothèque compilée dans l'exe, pas une dépendance à l'exécution.
@@ -36,7 +36,7 @@ Pas d'édition de PDF ni de Word (lecture et conversion seulement), pas de sorti
 | Langage | Rust 1.99.1 (MSVC), édition 2024 |
 | UI | `egui` 0.37.0, `egui-winit` 0.37.0 (presse-papiers et liens), `winit` 0.30.13, `egui_extras` 0.37 (coloration syntaxique sans syntect) |
 | Rendu | **CPU** : `hdrshot-egui-backend` 0.2.0 (importé sous le nom `egui_software_backend`) + `softbuffer` 0.4.8 (affichage GDI) |
-| Socle | `socle` **v0.1.5** (git, tag épinglé ; sa version s'affiche dans le menu ⋯). Features : `ui`, `images`, `img-exr`, `img-svg`, `img-wic`, `settings`, `crash`, `instance`, `update`, `testmode`. Sans `img-jxl` (voir §9) |
+| Socle | `socle` **v0.1.6** (git, tag épinglé ; sa version s'affiche dans le menu ⋯). Features : `ui`, `images`, `img-exr`, `img-svg`, `img-wic`, `settings`, `crash`, `instance`, `update`, `testmode`. Sans `img-jxl` (voir §9) |
 | Vidéo | Media Foundation `IMFMediaEngine`, qui dessine **directement sur le GPU dans une sous-fenêtre** (`vidwin.rs`). Replis : décodage DXVA par D3D11 avec relecture CPU, puis décodage logiciel avec bitmap WIC |
 | Montage, conversion audio/vidéo | Media Foundation : Source Reader et Sink Writer, encodeurs H.264, AAC, MP3 et WMA de Windows |
 | PDF | Affichage : `Windows.Data.Pdf` (WinRT). Texte : `lopdf` 0.47. Écriture : générateur maison (`pdfgen.rs`, `flate2`) |
@@ -138,7 +138,7 @@ Propre au lecteur :
 La référence vivante est l'aide **F1** (générée par `commands.rs`) ; ce tableau et celui du README la résument. Ctrl+S n'a pas le même sens pour une image et un texte : pour une image, l'action sûre (une copie) est la plus simple à taper ; pour un texte, on enregistre son propre fichier.
 
 ### Réglages et données
-- `%APPDATA%\lecteur-universel\settings.json` (`socle::settings`, écriture atomique, `#[serde(default)]`) : thème, récents, positions de reprise (au plus 300, la moins récemment utilisée est retirée), taille de la fenêtre, volume, panneau masqué, mise à jour automatique, palette récente, recherches récentes. Écrit 2 s après chaque changement, sur un fil (`socle::settings::Saver`, erreur affichée en toast), et une dernière fois à la fermeture ; jamais par l'aperçu ni en test.
+- `%APPDATA%\lecteur-universel\settings.json` (`socle::settings`, écriture atomique, `#[serde(default)]`) : thème, récents, positions de reprise (au plus 300, la moins récemment utilisée est retirée), taille de la fenêtre, volume, panneau masqué, mise à jour automatique, palette récente, recherches récentes. Écrit 300 ms après le dernier changement (au plus tard 2 s après le premier), sur un fil (`socle::settings::Saver`, erreur affichée en toast), et une dernière fois à la fermeture ; jamais par l'aperçu ni en test.
 - **Sauvegardes** : avant chaque remplacement d'un original, une copie horodatée va dans `Documents\Lecteur universel\Sauvegardes` ; si la copie échoue, rien n'est remplacé. Les sauvegardes de plus de 30 jours sont supprimées sans prévenir (pas de limite de taille du dossier). Aucune sauvegarde si rien n'a changé. L'écriture du nouveau fichier est atomique (fichier temporaire puis renommage).
 - Cache des points forts : `%LOCALAPPDATA%\lecteur-universel\points-forts`, purgé au démarrage (plus de 90 jours, 20 Mo au plus).
 - Journal de plantage : `%APPDATA%\lecteur-universel\crash.log` (socle), signalé par un toast au lancement suivant.
@@ -161,7 +161,7 @@ Un autre programme passe par l'exe (`lecteur-universel.exe --apercu <fichier>`),
 ### Installation et mise à jour
 - Zip GitHub `Lecteur-vX.Y.Z-windows-x64.zip` (exe, README, licence), avec une empreinte SHA-256 par asset (calculée par GitHub). Sur la machine de dev, `dist\` sert à deux choses : construire les zips de release et héberger l'exe installé (l'explorateur le cherche à côté de lui, dans `dist\`, puis dans `target\release\`).
 - Vérification au plus une fois par 24 h (`curl.exe`, API GitHub) ; un bandeau propose la mise à jour. Le socle n'installe un zip que s'il vient de `github.com` en HTTPS et que son SHA-256 correspond.
-- Installation : l'exe en cours est renommé `.old`, le nouveau prend sa place, l'aperçu en veille est terminé (`--quitter-apercu`), puis relance avec `--apres-maj`. Le `.old` est supprimé au démarrage suivant. Désactivable dans le menu ⋯.
+- Installation : l'exe en cours est renommé `.old`, le nouveau prend sa place, l'aperçu en veille est terminé (`--quitter-apercu`), puis relance avec `--apres-maj`. La nouvelle version est **à l'essai** : le `.old` reste à côté jusqu'à sa première image affichée ; si elle plante pendant l'essai ou démarre 2 fois sans afficher d'image, l'ancienne est remise et relancée (`--retour-maj`) et la version ratée n'est plus proposée (socle). Seul un processus qui ouvre une fenêtre compte comme un démarrage (pas les clients qui transmettent, `--formats`, la veille ni les tests). Désactivable dans le menu ⋯.
 
 ### Développer avec le socle local
 Renommer `.cargo/config.toml.socle-local` en `.cargo/config.toml` (non versionné) : Cargo prend alors `../socle`. Ne jamais commiter le `Cargo.lock` produit ainsi : il doit pointer vers le tag git.
@@ -206,7 +206,7 @@ Commentaires et messages en français ; fonctions de dessin libres (`fn draw_x(u
 | Écriture dans le registre | Seulement HKCU, et seulement quand l'utilisateur clique « Ajouter à "Ouvrir avec" » |
 
 ### Fiabilité et ressources
-- **Perte de données** : remplacement atomique et sauvegarde préalable (voir §5). Réglages écrits 2 s après chaque changement : un plantage ne perd que les toutes dernières secondes.
+- **Perte de données** : remplacement atomique et sauvegarde préalable (voir §5). Réglages écrits au plus tard 2 s après un changement : un plantage ne perd que les toutes dernières secondes.
 - **RAM vidéo** : environ 600 Mo pour une vidéo 5K à 60 i/s (tampons du décodage GPU), environ 850 Mo pendant le calcul des vignettes. La fenêtre de travail garde le pilote graphique (≈ 90 Mo, mesuré) après une vidéo ; seul l'aperçu le rend.
 - **Mode GPU direct** : la vidéo est une sous-fenêtre au-dessus de l'interface ; chaque élément posé dessus doit être déclaré comme zone à découper (`occl` : barre du haut, toasts, menus, palette, aide, suggestions). Un oubli le cache sous la vidéo.
 - **Formats** : pas de sortie WEBM (Windows n'a pas d'encodeur VP9). HEIC, AVIF, JPEG XL demandent une extension du Store (HEIC non testé sur la machine de dev). Pas de PNM.

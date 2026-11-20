@@ -92,6 +92,8 @@ struct Runner {
     smtc: Option<smtc::Smtc>,
     smtc_tried: bool,
     smtc_soon: bool,
+    /// Première image affichée (confirmation d'une mise à jour à l'essai)
+    confirmed: bool,
     title: String,
     started: Instant,
     /// Mode test : actions souris/clavier rejouées (LECTEUR_EVENTS), en points logiques.
@@ -254,6 +256,13 @@ impl Runner {
         let t_draw = t_start.elapsed().as_secs_f64();
         tdelta.clear();
         let _ = buf.present();
+        if !self.confirmed {
+            // première image affichée : la mise à jour à l'essai est validée (sans effet sinon)
+            self.confirmed = true;
+            if !discret() || std::env::var_os("LECTEUR_ESSAI").is_some() {
+                socle::update::confirm_started();
+            }
+        }
         if self.first_paints < 3 {
             self.first_paints += 1;
             trace(&format!("image {} affichée", self.first_paints));
@@ -698,6 +707,8 @@ fn wait_process(pid: u32, ms: u32) {
 fn main() {
     let _ = T0.set(Instant::now());
     socle::crash::install(APP, env!("CARGO_PKG_VERSION"));
+    // Mise à jour à l'essai : un plantage remet l'ancienne version (socle)
+    socle::update::rollback_on_panic();
     if discret() && !socle::testmode::enabled() {
         // Mode discret : le socle passe aussi en mode test (même chose pour les instances relancées).
         unsafe { std::env::set_var("SOCLE_TEST", "1") };
@@ -706,7 +717,8 @@ fn main() {
     update::cleanup_old();
     let args: Vec<String> = std::env::args().skip(1).collect();
     // Relance après mise à jour : on laisse l'ancienne instance se fermer.
-    let after_update = args.iter().any(|a| a == "--apres-maj");
+    // (--retour-maj : l'ancienne version, remise après l'échec d'une mise à jour)
+    let after_update = args.iter().any(|a| a == "--apres-maj" || a == socle::update::ROLLBACK_FLAG);
     if after_update {
         std::thread::sleep(std::time::Duration::from_millis(1500));
     }
@@ -787,6 +799,14 @@ fn main() {
         }
         trace("instance unique");
     }
+    // Mise à jour à l'essai : seul un processus qui ouvre vraiment une fenêtre compte comme un
+    // démarrage (pas les clients qui transmettent, ni --formats / --convert, ni la veille, ni les
+    // tests). Après 2 démarrages sans première image, l'ancienne version est remise.
+    // (LECTEUR_ESSAI : tester ce mécanisme en mode discret, sur une copie de l'exe)
+    let essai = !discret() || std::env::var_os("LECTEUR_ESSAI").is_some();
+    if !standby && essai && socle::update::startup() == socle::update::Startup::RolledBack {
+        return;
+    }
     trace("avant MFStartup");
     media::init_main();
     trace("MFStartup");
@@ -810,7 +830,7 @@ fn main() {
             let _ = p3.send_event(if close { UserEvent::ClosePreview } else { UserEvent::Open(paths, preview) });
         });
     }
-    let mut runner = Runner { ctx, gfx: None, app: None, settings: Some(app::Settings::load()), next_repaint: None, launch, launch_preview, standby, hidden_since: standby.then(Instant::now), proxy: proxy.clone(), smtc: None, smtc_tried: false, smtc_soon: false,
+    let mut runner = Runner { ctx, gfx: None, app: None, settings: Some(app::Settings::load()), next_repaint: None, launch, launch_preview, standby, hidden_since: standby.then(Instant::now), proxy: proxy.clone(), smtc: None, smtc_tried: false, smtc_soon: false, confirmed: false,
         title: String::new(),
         started: Instant::now(),
         script: std::env::var("LECTEUR_EVENTS")

@@ -1831,7 +1831,7 @@ checksum = "7a79a3332a6609480d7d0c9eab957bca6b455b91bb84e66d19f5ff66294b85b8"
 
 [[package]]
 name = "lecteur-universel"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "bytemuck",
  "drag",
@@ -3228,8 +3228,8 @@ dependencies = [
 
 [[package]]
 name = "socle"
-version = "0.1.5"
-source = "git+https://github.com/Desarrh/socle?tag=v0.1.5#0dc5decf4fa2c75e7c36cf79f2de8a6fd3f052b6"
+version = "0.1.6"
+source = "git+https://github.com/Desarrh/socle?tag=v0.1.6#6ba2c21a60e124278a2a5ab203b85e5e129c7acb"
 dependencies = [
  "egui",
  "image",

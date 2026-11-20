@@ -395,7 +395,8 @@ impl App {
             preview_only: false,
             video_used: false,
             want_hide: false,
-            saver: socle::settings::Saver::new(std::time::Duration::from_secs(2)),
+            // écrit 300 ms après le dernier changement, au plus tard 2 s après le premier
+            saver: socle::settings::Saver::debounced(std::time::Duration::from_millis(300), std::time::Duration::from_secs(2)),
             saved: s.clone(),
             title: "Lecteur universel".into(),
             s,
