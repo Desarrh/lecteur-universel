@@ -697,7 +697,7 @@ impl App {
                 crate::trace("lecteur média : ouvert");
                 let (p, err) = match opened {
                     Ok(mut p) => {
-                        p.set_volume(self.s.volume.unwrap_or(1.0));
+                        p.set_volume(if crate::discret() { 0.0 } else { self.s.volume.unwrap_or(1.0) });
                         (Some(p), None)
                     }
                     Err(e) => (None, Some(e.message().to_string())),

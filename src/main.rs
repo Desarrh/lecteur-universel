@@ -20,6 +20,14 @@ mod theme;
 mod wic;
 mod winx;
 
+/// Mode discret (règle n°0) : tests et captures ne dérangent jamais l'utilisateur. Fenêtre hors
+/// écran, sans focus ni bouton de barre des tâches, son coupé, réglages jamais écrits, tube factice.
+/// Automatique avec LECTEUR_SHOT / LECTEUR_SOLO, ou forcé par LECTEUR_DISCRET=1.
+pub fn discret() -> bool {
+    static D: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *D.get_or_init(|| ["LECTEUR_SHOT", "LECTEUR_SOLO", "LECTEUR_DISCRET"].iter().any(|k| std::env::var_os(k).is_some()))
+}
+
 /// Mesure du démarrage (LECTEUR_TRACE=1) : ms depuis le lancement du processus.
 static T0: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 pub fn trace(what: &str) {
@@ -60,6 +68,8 @@ enum UserEvent {
     Open(Vec<PathBuf>, bool),
     /// Touche multimédia / panneau multimédia de Windows
     Media(smtc::Btn),
+    /// « Fermer l'aperçu » reçu par le tube (--fermer-apercu)
+    ClosePreview,
 }
 
 struct Runner {
@@ -282,7 +292,7 @@ impl Runner {
     }
 
     fn save(&mut self) {
-        if self.launch_preview {
+        if self.launch_preview || discret() {
             return; // l'instance d'aperçu ne touche pas aux réglages de la fenêtre de travail
         }
         if let Some(app) = self.app.as_mut() {
@@ -315,6 +325,12 @@ impl ApplicationHandler<UserEvent> for Runner {
             .with_min_inner_size(LogicalSize::new(720.0, 480.0))
             .with_window_icon(window_icon())
             .with_visible(!self.standby);
+        let attrs = if discret() {
+            use winit::platform::windows::WindowAttributesExtWindows;
+            attrs.with_position(winit::dpi::PhysicalPosition::new(-32000, -32000)).with_active(false).with_skip_taskbar(true)
+        } else {
+            attrs
+        };
         trace("resumed");
         let window = Rc::new(el.create_window(attrs).expect("création de la fenêtre"));
         trace("fenêtre créée");
@@ -349,7 +365,7 @@ impl ApplicationHandler<UserEvent> for Runner {
             }
             a.test_env(&self.ctx);
             a.preview_only = self.launch_preview;
-            if !self.launch_preview {
+            if !self.launch_preview && !discret() {
                 a.auto_update_check();
             }
             if std::env::var("LECTEUR_PANELS").is_ok() {
@@ -427,6 +443,14 @@ impl ApplicationHandler<UserEvent> for Runner {
                     self.next_repaint = Some(self.next_repaint.map_or(t, |n| n.min(t)));
                 }
             }
+            UserEvent::ClosePreview => {
+                if let Some(a) = self.app.as_mut() {
+                    a.close_preview();
+                }
+                if let Some(g) = &self.gfx {
+                    g.window.request_redraw();
+                }
+            }
             UserEvent::Media(b) => {
                 if let Some(a) = self.app.as_mut() {
                     a.media_button(&self.ctx, b);
@@ -449,9 +473,21 @@ impl ApplicationHandler<UserEvent> for Runner {
                 self.first_paints = 0;
                 self.hidden_since = None;
                 if let Some(g) = &self.gfx {
-                    g.window.set_visible(true);
-                    g.window.set_minimized(false);
-                    g.window.focus_window();
+                    if discret() {
+                        // Jamais d'activation en test : la fenêtre (hors écran) apparaît sans voler le focus
+                        if let Some(h) = self.app.as_ref().and_then(|a| a.parent_hwnd) {
+                            use windows::Win32::UI::WindowsAndMessaging::{SW_SHOWNOACTIVATE, ShowWindow};
+                            unsafe {
+                                let _ = ShowWindow(windows::Win32::Foundation::HWND(h as *mut _), SW_SHOWNOACTIVATE);
+                            }
+                        }
+                    } else {
+                        g.window.set_visible(true);
+                    }
+                    if !discret() {
+                        g.window.set_minimized(false);
+                        g.window.focus_window();
+                    }
                     g.window.request_redraw();
                 }
             }
@@ -567,7 +603,7 @@ fn cli_convert(args: &[String]) -> i32 {
 
 fn main() {
     let _ = T0.set(Instant::now());
-    trace("main");
+    trace(&format!("main pid {}", std::process::id()));
     update::cleanup_old();
     let args: Vec<String> = std::env::args().skip(1).collect();
     // Relance après mise à jour : on laisse l'ancienne instance se fermer.
@@ -636,10 +672,15 @@ fn main() {
     }
     let launch: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).filter(|p| p.exists()).collect();
     // --apercu : aperçu rapide (Espace dans l'Explorateur), Échap le referme
+    // --fermer-apercu : referme l'aperçu affiché (pour l'explorateur, et pour les tests sans clavier)
+    if args.iter().any(|a| a == "--fermer-apercu") {
+        std::process::exit(if winx::close_preview() { 0 } else { 1 });
+    }
     let standby = args.iter().any(|a| a == "--apercu-veille");
     let launch_preview = (args.iter().any(|a| a == "--apercu") && !launch.is_empty()) || standby;
     // Instance unique : un 2ᵉ lancement ajoute un onglet dans la fenêtre existante.
     let test_mode = std::env::var("LECTEUR_SHOT").is_ok() || std::env::var("LECTEUR_SOLO").is_ok();
+    let test_mode = test_mode && std::env::var_os("LECTEUR_TUBE").is_none();
     if !test_mode && !after_update && !standby && winx::forward_to_running(&launch, launch_preview) {
         return;
     }
@@ -655,9 +696,9 @@ fn main() {
     });
     let p3 = proxy.clone();
     if !test_mode {
-        winx::serve(launch_preview, move |paths, preview| {
+        winx::serve(launch_preview, move |paths, preview, close| {
             trace("tube : message lu");
-            let _ = p3.send_event(UserEvent::Open(paths, preview));
+            let _ = p3.send_event(if close { UserEvent::ClosePreview } else { UserEvent::Open(paths, preview) });
         });
     }
     let mut runner = Runner { ctx, gfx: None, app: None, settings: Some(app::Settings::load()), next_repaint: None, launch, launch_preview, standby, hidden_since: standby.then(Instant::now), proxy: proxy.clone(), smtc: None, smtc_tried: false, smtc_soon: false,

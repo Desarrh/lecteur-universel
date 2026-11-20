@@ -16,8 +16,10 @@ const PIPE: &str = r"\\.\pipe\lecteur-universel-v1";
 /// Instance d'aperçu, séparée de la fenêtre de travail normale
 const PIPE_APERCU: &str = r"\\.\pipe\lecteur-universel-apercu-v1";
 
-fn pipe(preview: bool) -> &'static str {
-    if preview { PIPE_APERCU } else { PIPE }
+/// Nom du tube ; en mode discret (tests), un tube factice qui ne touche jamais au vrai lecteur.
+fn pipe(preview: bool) -> String {
+    let base = if preview { PIPE_APERCU } else { PIPE };
+    if crate::discret() { format!("{base}-test{}", std::env::var("LECTEUR_TUBE").unwrap_or_default()) } else { base.to_string() }
 }
 
 /// Si une instance tourne déjà, lui envoie les fichiers et renvoie vrai.
@@ -44,8 +46,17 @@ pub fn forward_to_running(paths: &[PathBuf], preview: bool) -> bool {
     }
 }
 
-/// Serveur : chaque message reçu est passé à `on_msg` (chemins, vide = « au premier plan » ; aperçu ?).
-pub fn serve(preview_instance: bool, on_msg: impl Fn(Vec<PathBuf>, bool) + Send + 'static) {
+/// Ferme l'aperçu en cours (message « \x03 » sur le tube d'aperçu). Vrai si une instance l'a reçu.
+pub fn close_preview() -> bool {
+    match std::fs::OpenOptions::new().write(true).open(pipe(true)) {
+        Ok(mut f) => f.write_all("\u{3}".as_bytes()).is_ok(),
+        Err(_) => false,
+    }
+}
+
+/// Serveur : chaque message reçu est passé à `on_msg` (chemins, vide = « au premier plan » ;
+/// aperçu ? ; fermer l'aperçu ?).
+pub fn serve(preview_instance: bool, on_msg: impl Fn(Vec<PathBuf>, bool, bool) + Send + 'static) {
     std::thread::spawn(move || {
         let name = HSTRING::from(pipe(preview_instance));
         loop {
@@ -69,13 +80,14 @@ pub fn serve(preview_instance: bool, on_msg: impl Fn(Vec<PathBuf>, bool) + Send 
                 }
                 let s = String::from_utf8_lossy(&data);
                 let preview = s.split('\n').any(|l| l.trim_end_matches('\r') == "\u{2}");
+                let close = s.split('\n').any(|l| l.trim_end_matches('\r') == "\u{3}");
                 let paths = s
                     .split('\n')
                     .map(|l| l.trim_end_matches('\r'))
-                    .filter(|l| !l.is_empty() && *l != "\u{1}" && *l != "\u{2}")
+                    .filter(|l| !l.is_empty() && *l != "\u{1}" && *l != "\u{2}" && *l != "\u{3}")
                     .map(PathBuf::from)
                     .collect();
-                on_msg(paths, preview || preview_instance);
+                on_msg(paths, preview || preview_instance, close);
             }
             unsafe {
                 let _ = DisconnectNamedPipe(h);
